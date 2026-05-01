@@ -5,24 +5,26 @@ portfolio:
   total_target_value_usd: 200000
 
 allocation:
-  # 60% trunk - the boring, stable foundation
+  # 50% trunk - tilted toward US equities for this experiment
   trunk:
-    weight: 0.60
+    weight: 0.50
     holdings:
-      VTI: 0.50
-      VXUS: 0.20
-      BND: 0.20
+      VTI: 0.70
+      VXUS: 0.10
+      BND: 0.10
       GLD: 0.10
 
-  # 25% branches - thematic conviction holdings
+  # 35% branches - thematic conviction holdings
   branches:
-    weight: 0.25
+    weight: 0.35
     holdings:
-      SMH: 0.20
-      XLU: 0.20
-      ITA: 0.20
-      IHI: 0.20
-      PAVE: 0.20
+      SMH: 0.143
+      XLU: 0.143
+      ITA: 0.143
+      IHI: 0.143
+      PAVE: 0.143
+      INDA: 0.143
+      COPX: 0.142
 
   # 15% acorns - held as cash in Phase 1, managed manually
   acorns:
