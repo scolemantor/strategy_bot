@@ -1,0 +1,39 @@
+# Oak strategy configuration
+# Edit the branches holdings to match your actual conviction picks.
+
+portfolio:
+  total_target_value_usd: 200000
+
+allocation:
+  # 60% trunk - the boring, stable foundation
+  trunk:
+    weight: 0.60
+    holdings:
+      VTI: 0.50
+      VXUS: 0.20
+      BND: 0.20
+      GLD: 0.10
+
+  # 25% branches - thematic conviction holdings
+  branches:
+    weight: 0.25
+    holdings:
+      SMH: 0.20
+      XLU: 0.20
+      ITA: 0.20
+      IHI: 0.20
+      PAVE: 0.20
+
+  # 15% acorns - held as cash in Phase 1, managed manually
+  acorns:
+    weight: 0.15
+
+rebalance:
+  drift_threshold: 0.05
+  min_order_size_usd: 100
+
+risk:
+  max_order_pct_of_portfolio: 0.05
+  max_daily_orders: 20
+  drawdown_kill_switch_pct: 0.05
+  require_market_hours: true
