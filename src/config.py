@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Dict, Literal, Optional
+from typing import Any, Dict, Literal, Optional
 
 import yaml
 from dotenv import load_dotenv
@@ -11,38 +11,91 @@ from pydantic import BaseModel, Field, model_validator
 
 
 WeightingMethod = Literal["equal", "inverse_volatility"]
+RiskClass = Literal["equity", "defensive"]
+
+
+class HoldingConfig(BaseModel):
+    """Per-holding config: weight (or bias multiplier) plus risk classification.
+
+    - weight: for equal-weighted sleeves, the within-sleeve weight (the values
+      across a sleeve must sum to 1.0). For inverse-volatility sleeves, a bias
+      multiplier (use 1.0 for pure inverse-vol).
+    - risk_class: 'equity' holdings get scaled down by the regime risk
+      multiplier when SPY drops below its 200dma. 'defensive' holdings (BND,
+      GLD, etc.) hold their static target through regime changes — they're
+      the assets you want to keep when equities sell off.
+    """
+    weight: float = Field(..., ge=0)
+    risk_class: RiskClass = "equity"
+
+
+def _normalize_holdings(value: Any) -> Any:
+    """Convert legacy flat-dict format ({'VTI': 0.70}) to structured format
+    ({'VTI': {weight: 0.70, risk_class: 'equity'}}).
+
+    Accepts either format and returns the structured form. Untagged holdings
+    default to risk_class='equity' for backward compatibility.
+    """
+    if not isinstance(value, dict):
+        return value  # let Pydantic raise the right error
+
+    normalized: Dict[str, Any] = {}
+    for symbol, entry in value.items():
+        if isinstance(entry, (int, float)):
+            normalized[symbol] = {"weight": float(entry), "risk_class": "equity"}
+        elif isinstance(entry, dict):
+            normalized[symbol] = entry
+        elif isinstance(entry, HoldingConfig):
+            normalized[symbol] = entry.model_dump()
+        else:
+            normalized[symbol] = entry  # let Pydantic raise on unknown type
+    return normalized
 
 
 class TrunkConfig(BaseModel):
     weight: float = Field(..., ge=0, le=1)
-    holdings: Dict[str, float]
+    holdings: Dict[str, HoldingConfig]
     weighting_method: WeightingMethod = "equal"
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize(cls, data: Any) -> Any:
+        if isinstance(data, dict) and "holdings" in data:
+            data = {**data, "holdings": _normalize_holdings(data["holdings"])}
+        return data
 
     @model_validator(mode="after")
     def weights_valid(self):
         if self.weighting_method == "equal":
-            total = sum(self.holdings.values())
+            total = sum(h.weight for h in self.holdings.values())
             if abs(total - 1.0) > 1e-3:
                 raise ValueError(f"Trunk equal-weight holdings sum to {total:.4f}, must be 1.0")
         else:
-            if any(v <= 0 for v in self.holdings.values()):
+            if any(h.weight <= 0 for h in self.holdings.values()):
                 raise ValueError("Inverse-vol bias multipliers must be positive")
         return self
 
 
 class BranchesConfig(BaseModel):
     weight: float = Field(..., ge=0, le=1)
-    holdings: Dict[str, float]
+    holdings: Dict[str, HoldingConfig]
     weighting_method: WeightingMethod = "equal"
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize(cls, data: Any) -> Any:
+        if isinstance(data, dict) and "holdings" in data:
+            data = {**data, "holdings": _normalize_holdings(data["holdings"])}
+        return data
 
     @model_validator(mode="after")
     def weights_valid(self):
         if self.weighting_method == "equal":
-            total = sum(self.holdings.values())
+            total = sum(h.weight for h in self.holdings.values())
             if abs(total - 1.0) > 1e-3:
                 raise ValueError(f"Branches equal-weight holdings sum to {total:.4f}, must be 1.0")
         else:
-            if any(v <= 0 for v in self.holdings.values()):
+            if any(h.weight <= 0 for h in self.holdings.values()):
                 raise ValueError("Inverse-vol bias multipliers must be positive")
         return self
 
@@ -94,10 +147,30 @@ class WeightingConfig(BaseModel):
 
 
 class RegimeConfig(BaseModel):
+    """200dma trend-following regime overlay with whipsaw protection.
+
+    Flips OFF when the benchmark closes below its `ma_window`-day moving
+    average by more than `buffer_pct` for `min_consecutive_days` consecutive
+    days. Flips ON when the benchmark closes above MA × (1 + buffer_pct) for
+    min_consecutive_days. Otherwise maintains prior state, which is determined
+    by scanning history backwards for the most recent unambiguous N-day window.
+
+    Stateless: same price history always produces the same regime.
+
+    When OFF, holdings tagged risk_class='equity' scale by (1 - offsignal_cash_pct).
+    Holdings tagged 'defensive' (BND, GLD) hold static targets — they're the
+    assets meant to anchor the portfolio during equity drawdowns.
+
+    Set buffer_pct=0 and min_consecutive_days=1 to revert to the original
+    daily-flip behavior (not recommended — generates whipsaws in choppy
+    markets and creates unnecessary tax events in taxable accounts).
+    """
     enabled: bool = False
     benchmark: str = "SPY"
     ma_window: int = Field(200, ge=10)
     offsignal_cash_pct: float = Field(0.40, ge=0, le=1)
+    buffer_pct: float = Field(0.02, ge=0, le=0.5)
+    min_consecutive_days: int = Field(3, ge=1, le=30)
 
 
 class RebalanceConfig(BaseModel):

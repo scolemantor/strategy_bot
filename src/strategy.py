@@ -5,14 +5,18 @@ Pure functions, no I/O. Inputs flow in via arguments, outputs via return values.
 Behaviors:
   - Per-sleeve weighting_method: 'equal' uses config weights as-is;
     'inverse_volatility' sizes each holding inversely to its trailing vol,
-    optionally biased by the value in the config holdings dict.
+    optionally biased by the holding's `weight` value.
   - Vol-weight clipping uses iterative water-filling so the configured
     min/max weights actually hold (single-pass cap-then-renormalize is broken).
   - Symbols with insufficient history or zero/missing vol fall back the entire
-    sleeve to equal weight rather than silently dropping the symbol from the
-    target allocation (safer than ghosting a holding).
-  - Regime overlay: if regime.enabled and the benchmark is below its moving
-    average, scales total equity exposure down by offsignal_cash_pct.
+    sleeve to equal weight rather than silently dropping the symbol.
+  - Regime overlay with whipsaw protection: state is determined by scanning
+    history backwards for the most recent N-day window where the benchmark
+    was unambiguously above MA × (1 + buffer) (state=ON) or below MA × (1 -
+    buffer) (state=OFF). Stateless and deterministic.
+  - When regime is OFF, the risk multiplier scales ONLY equity holdings
+    (per HoldingConfig.risk_class). Defensive holdings hold static targets.
+    Freed capital becomes cash.
 """
 from __future__ import annotations
 
@@ -150,12 +154,12 @@ def compute_sleeve_weights(
 ) -> Dict[str, float]:
     """Return symbol -> weight within the sleeve. Sums to 1.0.
 
-    For 'equal' weighting, returns config holdings dict directly.
+    For 'equal' weighting, returns each holding's configured weight directly.
 
     For 'inverse_volatility', sizes each holding inversely to its trailing vol
-    (window from weighting_cfg.vol_window_days) with config holdings values used
-    as bias multipliers (use 1.0 for pure inverse-vol). Result is clipped to
-    [min, max] from weighting_cfg via iterative water-filling.
+    (window from weighting_cfg.vol_window_days) with each holding's `weight`
+    value used as a bias multiplier (use 1.0 for pure inverse-vol). Result is
+    clipped to [min, max] from weighting_cfg via iterative water-filling.
 
     Falls back the entire sleeve to equal weighting if any symbol is missing
     history, has insufficient data, or has zero/non-finite vol. Never silently
@@ -167,7 +171,7 @@ def compute_sleeve_weights(
     equal = {s: 1 / n for s in symbols}
 
     if sleeve_cfg.weighting_method == "equal":
-        return dict(sleeve_cfg.holdings)
+        return {s: h.weight for s, h in sleeve_cfg.holdings.items()}
 
     if historical_prices is None or historical_prices.empty:
         log.warning("No historical prices supplied for vol weighting; using equal weights")
@@ -201,7 +205,7 @@ def compute_sleeve_weights(
             return equal
         vols[s] = v
 
-    bias = {s: float(sleeve_cfg.holdings[s]) for s in symbols}
+    bias = {s: sleeve_cfg.holdings[s].weight for s in symbols}
     raw = {s: bias[s] / vols[s] for s in symbols}
     total = sum(raw.values())
     if total <= 0:
@@ -220,10 +224,15 @@ def evaluate_regime(
     cfg: StrategyConfig,
     historical_prices: Optional[pd.DataFrame],
 ) -> RegimeStatus:
-    """Decide whether we are 'risk on' (full equity exposure) or 'risk off' (scaled down).
+    """Decide ON (full equity exposure) vs OFF (scaled-down equity exposure).
 
-    Returns a status with risk_multiplier in [0, 1] applied to all equity targets.
-    1.0 = full risk on, lower values = risk off.
+    Stateless — current regime is determined entirely by recent benchmark price
+    history. Requires `min_consecutive_days` of unambiguous price action past
+    the buffered MA threshold to flip; otherwise inherits the most recent
+    unambiguous regime by scanning history backwards.
+
+    Returns RegimeStatus with risk_multiplier in [0, 1] applied later to equity
+    holdings only. 1.0 = full risk on; lower values = risk off.
     """
     if not cfg.regime.enabled:
         return RegimeStatus(
@@ -242,10 +251,15 @@ def evaluate_regime(
         )
 
     series = historical_prices[bench].dropna()
-    if len(series) < cfg.regime.ma_window:
+    ma_window = cfg.regime.ma_window
+    n_consecutive = cfg.regime.min_consecutive_days
+
+    # Need at least ma_window days for the MA itself, plus N consecutive days
+    # to evaluate the trigger window
+    if len(series) < ma_window + n_consecutive - 1:
         log.warning(
-            f"Need {cfg.regime.ma_window} days of {bench} history, have {len(series)}; "
-            "defaulting to risk-on"
+            f"Need {ma_window + n_consecutive - 1} days of {bench} history, "
+            f"have {len(series)}; defaulting to risk-on"
         )
         return RegimeStatus(
             enabled=True, benchmark=bench,
@@ -253,14 +267,35 @@ def evaluate_regime(
             moving_average=0.0, is_offsignal=False, risk_multiplier=1.0,
         )
 
-    ma = float(series.tail(cfg.regime.ma_window).mean())
+    # Compute rolling MA series and buffered thresholds at every point
+    ma_series = series.rolling(ma_window).mean()
+    buffer_pct = cfg.regime.buffer_pct
+    above_upper = series > (ma_series * (1 + buffer_pct))
+    below_lower = series < (ma_series * (1 - buffer_pct))
+
+    # An "ON event" at index i means: indices [i-N+1, i] are all above_upper.
+    # Implement via rolling sum: window of N booleans summing to N means all True.
+    # Same for OFF events.
+    on_window = above_upper.rolling(n_consecutive).sum() == n_consecutive
+    off_window = below_lower.rolling(n_consecutive).sum() == n_consecutive
+
+    # Find most recent index (positional) where each fired
+    on_positions = np.where(on_window.values)[0]
+    off_positions = np.where(off_window.values)[0]
+
+    last_on_pos = int(on_positions[-1]) if len(on_positions) else -1
+    last_off_pos = int(off_positions[-1]) if len(off_positions) else -1
+
+    # Most recent unambiguous event wins. If neither has fired, default ON.
+    is_offsignal = last_off_pos > last_on_pos
+
     last_price = float(series.iloc[-1])
-    is_offsignal = last_price < ma
+    last_ma = float(ma_series.iloc[-1])
     multiplier = (1 - cfg.regime.offsignal_cash_pct) if is_offsignal else 1.0
 
     return RegimeStatus(
         enabled=True, benchmark=bench,
-        benchmark_price=last_price, moving_average=ma,
+        benchmark_price=last_price, moving_average=last_ma,
         is_offsignal=is_offsignal, risk_multiplier=multiplier,
     )
 
@@ -272,7 +307,10 @@ def compute_target_values(
 ) -> Dict[str, float]:
     """Map each tracked symbol to its target dollar value.
 
-    Applies sleeve weighting (equal or inverse-vol) and the regime risk multiplier.
+    Applies sleeve weighting (equal or inverse-vol) and the regime risk
+    multiplier. Risk multiplier scales only holdings tagged risk_class='equity';
+    'defensive' holdings (BND, GLD, etc.) hold their static target through
+    regime changes. The freed capital from scaled-down equity becomes cash.
     The acorns sleeve is held as cash and not tracked here.
     """
     regime = evaluate_regime(cfg, historical_prices)
@@ -280,15 +318,21 @@ def compute_target_values(
 
     targets: Dict[str, float] = {}
 
-    trunk_value = portfolio_value * cfg.allocation.trunk.weight * risk_mult
-    trunk_weights = compute_sleeve_weights(cfg.allocation.trunk, historical_prices, cfg.weighting)
-    for symbol, w in trunk_weights.items():
-        targets[symbol] = trunk_value * w
+    # Trunk
+    trunk_sleeve_value = portfolio_value * cfg.allocation.trunk.weight
+    trunk_within = compute_sleeve_weights(cfg.allocation.trunk, historical_prices, cfg.weighting)
+    for symbol, w in trunk_within.items():
+        risk_class = cfg.allocation.trunk.holdings[symbol].risk_class
+        raw_target = trunk_sleeve_value * w
+        targets[symbol] = raw_target * risk_mult if risk_class == "equity" else raw_target
 
-    branches_value = portfolio_value * cfg.allocation.branches.weight * risk_mult
-    branches_weights = compute_sleeve_weights(cfg.allocation.branches, historical_prices, cfg.weighting)
-    for symbol, w in branches_weights.items():
-        targets[symbol] = branches_value * w
+    # Branches
+    branches_sleeve_value = portfolio_value * cfg.allocation.branches.weight
+    branches_within = compute_sleeve_weights(cfg.allocation.branches, historical_prices, cfg.weighting)
+    for symbol, w in branches_within.items():
+        risk_class = cfg.allocation.branches.holdings[symbol].risk_class
+        raw_target = branches_sleeve_value * w
+        targets[symbol] = raw_target * risk_mult if risk_class == "equity" else raw_target
 
     return targets
 
