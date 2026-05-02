@@ -38,3 +38,6 @@ risk:
   max_daily_orders: 20
   drawdown_kill_switch_pct: 0.05
   require_market_hours: true
+ledger:
+  enabled: true
+  db_path: "~/strategy_bot_data/lot_ledger.sqlite"
