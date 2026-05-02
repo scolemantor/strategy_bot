@@ -207,10 +207,17 @@ def cmd_rebalance(
     historical_prices = _fetch_history_for_live(cfg, creds)
 
     tracked = cfg.all_tracked_symbols()
-    log.info(f"Fetching quotes for {len(tracked)} symbols")
-    quotes = broker.get_quotes(tracked)
+    # Fetch quotes for tracked symbols AND for held positions outside the
+    # YAML — those need quotes to generate auto-liquidation sell orders.
+    held_symbols = [s for s, p in positions.items() if p.qty > 0]
+    quote_symbols = sorted(set(tracked) | set(held_symbols))
+    log.info(
+        f"Fetching quotes for {len(quote_symbols)} symbols "
+        f"({len(tracked)} tracked + {len(set(held_symbols) - set(tracked))} held-untracked)"
+    )
+    quotes = broker.get_quotes(quote_symbols)
 
-    missing_quotes = [s for s in tracked if quotes.get(s, 0) <= 0]
+    missing_quotes = [s for s in quote_symbols if quotes.get(s, 0) <= 0]
     if missing_quotes:
         log.warning(f"Missing quotes for: {missing_quotes} - those holdings will be skipped")
 

@@ -368,9 +368,34 @@ def compute_rebalance_orders(
     cfg: StrategyConfig,
     historical_prices: Optional[pd.DataFrame] = None,
 ) -> List[RebalanceOrder]:
-    """Generate rebalance orders for holdings outside the drift threshold."""
+    """Generate rebalance orders for holdings outside the drift threshold.
+
+    Includes auto-liquidation of held positions that are no longer in the
+    YAML allocation. Any symbol present in `positions` with qty > 0 but
+    absent from the computed targets is treated as target=0 — generates
+    a full sell order to liquidate. This means the YAML is the source of
+    truth: if a holding is removed from the YAML (e.g. VXUS→VTI swap),
+    the next rebalance winds it down.
+    """
     targets = compute_target_values(portfolio_value, cfg, historical_prices)
     statuses = compute_holding_status(positions, targets, cfg)
+
+    # Auto-detect untracked held positions and append target=0 statuses so
+    # they get sold. The order generator below already handles the
+    # target=0/current>0 case as a full liquidation.
+    tracked_symbols = set(targets.keys())
+    for symbol, pos in positions.items():
+        if symbol in tracked_symbols:
+            continue
+        if pos.qty <= 0 or pos.market_value <= 0:
+            continue
+        statuses.append(TargetHolding(
+            symbol=symbol,
+            sleeve="untracked",
+            target_value=0.0,
+            current_value=pos.market_value,
+            drift_pct=0.0,
+        ))
 
     orders: List[RebalanceOrder] = []
     for status in statuses:
