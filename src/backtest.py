@@ -62,6 +62,18 @@ def run_backtest(
     initial_capital: float = 100_000.0,
     rebalance_frequency: str = "M",
 ) -> BacktestResult:
+    """Run a paper backtest of the rebalancer over `closes`.
+
+    `closes` must contain every tracked symbol (else ValueError). It MAY
+    contain additional columns — typically the regime benchmark (SPY) — which
+    are not traded but are passed through to the strategy as historical
+    context. evaluate_regime and compute_sleeve_weights use whatever columns
+    are present; missing ones trigger the documented fallbacks.
+
+    On each rebalance bar, the slice of price history up through that bar
+    (no look-ahead) is passed to compute_rebalance_orders so vol-weighting,
+    regime detection, and any other lookback signals can use real history.
+    """
     tracked = cfg.all_tracked_symbols()
     missing = [s for s in tracked if s not in closes.columns]
     if missing:
@@ -96,9 +108,16 @@ def run_backtest(
         if any(pd.isna(prices.get(s)) for s in tracked):
             continue
 
+        # Slice history up through and including the current bar. This is the
+        # critical line that was missing before — without it, the strategy
+        # never saw historical prices, regime stayed permanently ON, and
+        # vol-weighting silently fell back to equal weight.
+        history_so_far = closes.loc[:ts]
+
         proposed_orders = compute_rebalance_orders(
             position_objs, total_value,
             {s: float(prices[s]) for s in tracked}, cfg,
+            historical_prices=history_so_far,
         )
 
         slip = SLIPPAGE_BPS / 10_000

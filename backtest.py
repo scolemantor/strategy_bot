@@ -63,7 +63,7 @@ def main() -> None:
     parser.add_argument(
         "--benchmark",
         default="SPY",
-        help="Symbol to use as buy-and-hold benchmark. Default: SPY.",
+        help="Symbol to use as buy-and-hold benchmark for the report. Default: SPY.",
     )
     parser.add_argument(
         "--output-dir",
@@ -81,25 +81,50 @@ def main() -> None:
     cfg = load_strategy(args.config)
     creds = load_credentials()
 
-    symbols = cfg.all_tracked_symbols() + [args.benchmark]
+    # Build the fetch list: tracked symbols, plus the report benchmark, plus
+    # the regime benchmark (which may differ from the report benchmark and
+    # which must be available for evaluate_regime to work in-loop).
+    fetch_symbols = set(cfg.all_tracked_symbols())
+    fetch_symbols.add(args.benchmark)
+    if cfg.regime.enabled:
+        fetch_symbols.add(cfg.regime.benchmark)
+    fetch_symbols = sorted(fetch_symbols)
+
     log.info(f"Backtest period: {args.start} to {args.end}")
     log.info(f"Capital: ${args.capital:,.0f}, frequency: {args.frequency}")
-    log.info(f"Fetching bars for {len(symbols)} symbols")
+    log.info(f"Fetching bars for {len(fetch_symbols)} symbols")
 
-    bars = fetch_bars(symbols, args.start, args.end, creds, use_cache=not args.no_cache)
+    bars = fetch_bars(fetch_symbols, args.start, args.end, creds, use_cache=not args.no_cache)
     closes = aligned_close_prices(bars)
 
     if closes.empty:
         log.error("No data returned. Check date range and symbols.")
         return
 
-    # Trim closes to symbols in the strategy (drop benchmark before passing to backtest)
-    strategy_closes = closes[cfg.all_tracked_symbols()].dropna()
+    # Build the column set passed into the strategy: tracked symbols (required
+    # for trading) plus the regime benchmark (required for evaluate_regime to
+    # actually evaluate). Drop rows where any TRACKED symbol is NaN — those
+    # are days we can't trade. The benchmark column is allowed to have gaps;
+    # evaluate_regime handles missing benchmark data with documented defaults.
+    strategy_columns = list(cfg.all_tracked_symbols())
+    if cfg.regime.enabled and cfg.regime.benchmark not in strategy_columns:
+        if cfg.regime.benchmark in closes.columns:
+            strategy_columns.append(cfg.regime.benchmark)
+        else:
+            log.warning(
+                f"Regime is enabled but benchmark {cfg.regime.benchmark} not in fetched "
+                f"data. Regime overlay will default ON for the entire backtest."
+            )
+
+    strategy_closes = closes[strategy_columns].dropna(subset=cfg.all_tracked_symbols())
     if strategy_closes.empty:
         log.error("No overlapping dates for all strategy symbols. Try a later start date.")
         return
 
     log.info(f"Running backtest on {len(strategy_closes)} trading days")
+    if cfg.regime.enabled and cfg.regime.benchmark in strategy_closes.columns:
+        log.info(f"Regime overlay active using {cfg.regime.benchmark}")
+
     result = run_backtest(
         cfg,
         strategy_closes,
