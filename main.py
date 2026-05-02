@@ -6,16 +6,32 @@ Commands:
 
 Defaults to dry-run. Live execution requires --execute AND non-paper credentials
 AND an explicit typed confirmation.
+
+Tax-aware lot ledger (Phase 3):
+  When `ledger.enabled: true` is set in strategy.yaml, the bot maintains a
+  SQLite database of every fill to track per-lot cost basis. Before each
+  rebalance run that will execute, the bot:
+    1. Auto-seeds (idempotent) any broker-held symbols not yet in the ledger.
+    2. Reconciles ledger total qty against broker-reported qty per symbol.
+    3. Halts the rebalance if reconciliation finds any mismatch.
+
+  Dry runs do not touch the ledger.
+  When `ledger.enabled: false` (default), the bot runs exactly as pre-Phase-3.
 """
 from __future__ import annotations
 
 import argparse
 import logging
 import sys
+from datetime import date
+from pathlib import Path
+from typing import Optional
 
 from src.broker import AlpacaBroker
 from src.config import StrategyConfig, load_credentials, load_strategy
 from src.executor import execute_orders
+from src.lot_ledger import LotLedger
+from src.lot_migration import reconcile_with_broker, seed_from_broker
 from src.risk import check_orders
 from src.strategy import (
     compute_holding_status,
@@ -65,13 +81,48 @@ def cmd_status(broker: AlpacaBroker, cfg: StrategyConfig) -> None:
     print()
 
 
-def cmd_rebalance(broker: AlpacaBroker, cfg: StrategyConfig, dry_run: bool, seeding_mode: bool = False) -> None:
+def cmd_rebalance(
+    broker: AlpacaBroker,
+    cfg: StrategyConfig,
+    dry_run: bool,
+    seeding_mode: bool = False,
+    ledger: Optional[LotLedger] = None,
+) -> None:
     log = logging.getLogger("rebalance")
 
     log.info("Fetching account state and positions")
     account = broker.get_account()
     positions = broker.get_positions()
     log.info(f"Portfolio value: ${account.portfolio_value:,.2f}")
+
+    # Ledger seeding + reconciliation (only when actually executing)
+    if ledger is not None and not dry_run:
+        seed_result = seed_from_broker(
+            ledger, positions, date.today(), only_missing=True
+        )
+        if seed_result.seeded_symbols:
+            log.info(
+                f"Seeded ledger with {len(seed_result.seeded_symbols)} new symbol(s): "
+                f"{', '.join(seed_result.seeded_symbols)}"
+            )
+
+        recon = reconcile_with_broker(ledger, positions)
+        if not recon.is_clean:
+            log.error("Ledger/broker reconciliation FAILED — refusing to trade")
+            for line in recon.summary().split("\n"):
+                log.error(f"  {line}")
+            print("\n" + "=" * 60)
+            print("  LEDGER MISMATCH — REFUSING TO TRADE")
+            print("=" * 60)
+            print(recon.summary())
+            print()
+            print("Possible causes: manual trades outside the bot, dividend")
+            print("reinvestment, stock splits, or a corrupted ledger.")
+            print()
+            print("Fix manually before retrying. To bypass the ledger temporarily,")
+            print("set ledger.enabled: false in config/strategy.yaml.")
+            print()
+            sys.exit(2)
 
     tracked = cfg.all_tracked_symbols()
     log.info(f"Fetching quotes for {len(tracked)} symbols")
@@ -116,19 +167,32 @@ def cmd_rebalance(broker: AlpacaBroker, cfg: StrategyConfig, dry_run: bool, seed
 
     mode = "DRY RUN" if dry_run else "LIVE EXECUTION"
     print(f"\n=== {mode}: {len(risk_result.approved)} order(s) approved ===")
-    results = execute_orders(risk_result.approved, broker, dry_run=dry_run)
+    results = execute_orders(
+        risk_result.approved,
+        broker,
+        dry_run=dry_run,
+        ledger=ledger,
+    )
 
     print("\n=== Summary ===")
+    ledger_failures = 0
     for r in results:
-        line = f"  {r.status.upper():<10} {r.side:<5} {r.qty:>10.4f} {r.symbol}"
+        line = f"  {r.status.upper():<24} {r.side:<5} {r.qty:>10.4f} {r.symbol}"
         print(line)
         if r.error:
             print(f"             error: {r.error}")
+        if "_LEDGER_FAILED" in r.status:
+            ledger_failures += 1
+
+    if ledger_failures:
+        print()
+        print(f"  WARNING: {ledger_failures} order(s) had LEDGER UPDATE FAILURES.")
+        print("  Run reconciliation manually before next rebalance.")
     print()
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Oak strategy trading bot (Phase 1)")
+    parser = argparse.ArgumentParser(description="Oak strategy trading bot")
     parser.add_argument("command", choices=["status", "rebalance"])
     parser.add_argument("--config", default="config/strategy.yaml")
     parser.add_argument(
@@ -175,10 +239,22 @@ def main() -> None:
     log.info(f"Connecting to Alpaca ({'paper' if creds.paper else 'LIVE'})")
     broker = AlpacaBroker(creds)
 
+    # Open lot ledger if enabled in config
+    ledger: Optional[LotLedger] = None
+    if cfg.ledger.enabled:
+        db_path = Path(cfg.ledger.db_path).expanduser()
+        log.info(f"Tax-aware ledger enabled, opening at {db_path}")
+        ledger = LotLedger(db_path)
+
     if args.command == "status":
         cmd_status(broker, cfg)
     elif args.command == "rebalance":
-        cmd_rebalance(broker, cfg, dry_run=not args.execute, seeding_mode=args.seeding)
+        cmd_rebalance(
+            broker, cfg,
+            dry_run=not args.execute,
+            seeding_mode=args.seeding,
+            ledger=ledger,
+        )
 
 
 if __name__ == "__main__":

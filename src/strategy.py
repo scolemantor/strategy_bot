@@ -50,6 +50,11 @@ class RebalanceOrder:
     current_value: float
     delta_value: float
     estimated_qty: float
+    # Latest quote at the time of order computation. Used by the executor
+    # as an estimated cost basis (buys) or sale price (sells) when updating
+    # the lot ledger. The actual fill may differ; reconciliation against
+    # the broker on the next run will detect persistent drift.
+    est_price: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -400,5 +405,6 @@ def compute_rebalance_orders(
             current_value=status.current_value,
             delta_value=delta,
             estimated_qty=qty,
+            est_price=price,
         ))
     return orders

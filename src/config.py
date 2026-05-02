@@ -185,6 +185,25 @@ class RiskConfig(BaseModel):
     require_market_hours: bool = True
 
 
+class LedgerConfig(BaseModel):
+    """Tax lot ledger configuration.
+
+    When enabled, the bot maintains a SQLite database of every buy/sell to
+    track per-lot cost basis for tax-aware sell decisions (HIFO with
+    long-term preference and opportunistic loss harvesting).
+
+    The database is persistent and survives across runs. Default path is
+    outside the repo so it survives clean clones — override for tests or
+    multi-account setups. The path is expanded with ~ for home directory.
+
+    When disabled (default), the bot runs exactly as it did pre-Phase 3:
+    no ledger reads, no ledger writes, no reconciliation. Existing YAMLs
+    without a ledger: block continue to work unchanged.
+    """
+    enabled: bool = False
+    db_path: str = "~/strategy_bot_data/lot_ledger.sqlite"
+
+
 class PortfolioConfig(BaseModel):
     total_target_value_usd: float = Field(..., gt=0)
 
@@ -196,6 +215,7 @@ class StrategyConfig(BaseModel):
     rebalance: RebalanceConfig
     risk: RiskConfig
     regime: RegimeConfig = Field(default_factory=RegimeConfig)
+    ledger: LedgerConfig = Field(default_factory=LedgerConfig)
 
     def all_tracked_symbols(self) -> list[str]:
         return list(self.allocation.trunk.holdings) + list(self.allocation.branches.holdings)
