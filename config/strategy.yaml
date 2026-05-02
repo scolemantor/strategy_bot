@@ -4,15 +4,14 @@ portfolio:
   total_target_value_usd: 200000
 allocation:
   trunk:
-    weight: 0.50
+    weight: 0.70
     weighting_method: equal
     holdings:
-      VTI:  { weight: 0.70, risk_class: equity }
-      VXUS: { weight: 0.10, risk_class: equity }
-      BND:  { weight: 0.10, risk_class: defensive }
+      VTI:  { weight: 0.80, risk_class: equity }
+      BIL:  { weight: 0.10, risk_class: defensive }
       GLD:  { weight: 0.10, risk_class: defensive }
   branches:
-    weight: 0.35
+    weight: 0.20
     weighting_method: inverse_volatility
     holdings:
       SMH: 1.0
@@ -23,15 +22,12 @@ allocation:
       INDA: 1.0
       COPX: 1.0
   acorns:
-    weight: 0.15
+    weight: 0.10
 regime:
   enabled: true
   benchmark: SPY
   ma_window: 200
   offsignal_cash_pct: 0.40
-  # Whipsaw protection (added Phase 3): SPY must be more than buffer_pct past
-  # the MA for min_consecutive_days consecutive days to flip the regime.
-  # These defaults are conservative; tune via Phase 4e backtest sweep.
   buffer_pct: 0.02
   min_consecutive_days: 3
 rebalance:
