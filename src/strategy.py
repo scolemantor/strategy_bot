@@ -2,12 +2,17 @@
 
 Pure functions, no I/O. Inputs flow in via arguments, outputs via return values.
 
-The new behaviors:
-  - Per-sleeve weighting_method: 'equal' uses config weights as-is; 'inverse_volatility'
-    sizes each holding inversely to its trailing 90-day volatility, optionally biased
-    by the value in the config holdings dict.
-  - Regime overlay: if regime.enabled and the benchmark is below its moving average,
-    scales total equity exposure down by offsignal_cash_pct.
+Behaviors:
+  - Per-sleeve weighting_method: 'equal' uses config weights as-is;
+    'inverse_volatility' sizes each holding inversely to its trailing vol,
+    optionally biased by the value in the config holdings dict.
+  - Vol-weight clipping uses iterative water-filling so the configured
+    min/max weights actually hold (single-pass cap-then-renormalize is broken).
+  - Symbols with insufficient history or zero/missing vol fall back the entire
+    sleeve to equal weight rather than silently dropping the symbol from the
+    target allocation (safer than ghosting a holding).
+  - Regime overlay: if regime.enabled and the benchmark is below its moving
+    average, scales total equity exposure down by offsignal_cash_pct.
 """
 from __future__ import annotations
 
@@ -19,13 +24,9 @@ import numpy as np
 import pandas as pd
 
 from .broker import Position
-from .config import BranchesConfig, StrategyConfig, TrunkConfig
+from .config import BranchesConfig, StrategyConfig, TrunkConfig, WeightingConfig
 
 log = logging.getLogger(__name__)
-
-VOL_WINDOW_DAYS = 90
-MIN_WEIGHT_WITHIN_SLEEVE = 0.05
-MAX_WEIGHT_WITHIN_SLEEVE = 0.40
 
 
 @dataclass(frozen=True)
@@ -65,56 +66,154 @@ def _sleeve_for_symbol(symbol: str, cfg: StrategyConfig) -> str:
     return "untracked"
 
 
+def _waterfill_clip(
+    weights: Dict[str, float],
+    min_weight: float,
+    max_weight: float,
+) -> Dict[str, float]:
+    """Clip weights to [min_weight, max_weight] preserving total = 1.0.
+
+    Iterative water-filling: pin out-of-bound weights to their caps, redistribute
+    spillover pro-rata to remaining (free) weights, repeat until all free weights
+    are in bounds.
+
+    Why not single-pass cap-then-renormalize? Renormalizing after clipping pushes
+    capped weights right back over the cap. Worked example: weights = [0.85, 0.05,
+    0.05, 0.05] and max=0.40. Cap → [0.40, 0.05, 0.05, 0.05] (sum 0.55), divide by
+    0.55 → [0.727, 0.091, 0.091, 0.091]. First weight is now 0.727, well above 0.40.
+
+    Raises ValueError if bounds are infeasible (min*n > 1 or max*n < 1).
+    """
+    n = len(weights)
+    if n == 0:
+        return {}
+
+    if min_weight * n > 1.0 + 1e-9 or max_weight * n < 1.0 - 1e-9:
+        raise ValueError(
+            f"Infeasible bounds for {n} symbols: need min*n <= 1 <= max*n, "
+            f"got min*n = {min_weight*n:.4f}, max*n = {max_weight*n:.4f}"
+        )
+
+    w = dict(weights)
+    pinned: set[str] = set()
+
+    # Pin the single most extreme violator per iteration, then redistribute.
+    # Pinning ALL violators at once over-constrains (e.g. weights [0.90, 0.04,
+    # 0.04, 0.02] with min=0.05, max=0.40 would pin A to max AND B/C/D to min,
+    # leaving no free weights to absorb the missing mass). At most 2n+1
+    # iterations: each iteration pins exactly one weight.
+    for _ in range(2 * n + 1):
+        worst: tuple[str, str, float] | None = None  # (symbol, kind, magnitude)
+        for s, v in w.items():
+            if s in pinned:
+                continue
+            if v > max_weight + 1e-12:
+                violation = v - max_weight
+                if worst is None or violation > worst[2]:
+                    worst = (s, "high", violation)
+            elif v < min_weight - 1e-12:
+                violation = min_weight - v
+                if worst is None or violation > worst[2]:
+                    worst = (s, "low", violation)
+
+        if worst is None:
+            break  # All free weights in bounds
+
+        s, kind, _ = worst
+        w[s] = max_weight if kind == "high" else min_weight
+        pinned.add(s)
+
+        free = [k for k in w if k not in pinned]
+        if not free:
+            break
+
+        pinned_mass = sum(w[k] for k in pinned)
+        free_target = 1.0 - pinned_mass
+        free_current = sum(w[k] for k in free)
+
+        if free_current <= 0:
+            share = free_target / len(free)
+            for k in free:
+                w[k] = share
+        else:
+            scale = free_target / free_current
+            for k in free:
+                w[k] = w[k] * scale
+
+    return w
+
+
 def compute_sleeve_weights(
     sleeve_cfg: TrunkConfig | BranchesConfig,
     historical_prices: Optional[pd.DataFrame],
+    weighting_cfg: WeightingConfig,
 ) -> Dict[str, float]:
     """Return symbol -> weight within the sleeve. Sums to 1.0.
 
     For 'equal' weighting, returns config holdings dict directly.
-    For 'inverse_volatility', computes weights from trailing vol with config
-    holdings values as bias multipliers (use 1.0 for pure inverse-vol).
-    Falls back to equal weighting if insufficient history.
+
+    For 'inverse_volatility', sizes each holding inversely to its trailing vol
+    (window from weighting_cfg.vol_window_days) with config holdings values used
+    as bias multipliers (use 1.0 for pure inverse-vol). Result is clipped to
+    [min, max] from weighting_cfg via iterative water-filling.
+
+    Falls back the entire sleeve to equal weighting if any symbol is missing
+    history, has insufficient data, or has zero/non-finite vol. Never silently
+    drops a symbol — the rebalancer treating a position as untracked is more
+    dangerous than a temporary fallback to equal weight.
     """
     symbols = list(sleeve_cfg.holdings.keys())
+    n = len(symbols)
+    equal = {s: 1 / n for s in symbols}
 
     if sleeve_cfg.weighting_method == "equal":
         return dict(sleeve_cfg.holdings)
 
     if historical_prices is None or historical_prices.empty:
         log.warning("No historical prices supplied for vol weighting; using equal weights")
-        return {s: 1 / len(symbols) for s in symbols}
+        return equal
 
-    available_cols = [s for s in symbols if s in historical_prices.columns]
-    if len(available_cols) < len(symbols):
-        missing = set(symbols) - set(available_cols)
-        log.warning(f"Missing history for {missing}; using equal weights")
-        return {s: 1 / len(symbols) for s in symbols}
-
-    prices = historical_prices[available_cols].dropna()
-    if len(prices) < VOL_WINDOW_DAYS:
+    missing = set(symbols) - set(historical_prices.columns)
+    if missing:
         log.warning(
-            f"Need {VOL_WINDOW_DAYS} days of history for vol weighting, have {len(prices)}; "
-            "using equal weights"
+            f"Missing history for {sorted(missing)}; falling back to equal weights for sleeve"
         )
-        return {s: 1 / len(symbols) for s in symbols}
+        return equal
 
-    returns = prices.tail(VOL_WINDOW_DAYS).pct_change().dropna()
-    vols = returns.std() * np.sqrt(252)
+    # Per-column vol calc — don't cross-drop rows just because one column has
+    # NaNs. Each symbol's vol is computed from its own non-null tail.
+    vol_window = weighting_cfg.vol_window_days
+    vols: Dict[str, float] = {}
+    for s in symbols:
+        col = historical_prices[s].dropna()
+        if len(col) < vol_window:
+            log.warning(
+                f"{s}: need {vol_window} days of history for vol weighting, "
+                f"have {len(col)}; falling back to equal weights for sleeve"
+            )
+            return equal
+        returns = col.tail(vol_window).pct_change().dropna()
+        v = float(returns.std())
+        if not np.isfinite(v) or v <= 0:
+            log.warning(
+                f"{s}: zero or non-finite vol ({v}); falling back to equal weights for sleeve"
+            )
+            return equal
+        vols[s] = v
 
     bias = {s: float(sleeve_cfg.holdings[s]) for s in symbols}
-    raw = {s: bias[s] / float(vols[s]) for s in symbols if vols[s] > 0}
+    raw = {s: bias[s] / vols[s] for s in symbols}
     total = sum(raw.values())
     if total <= 0:
-        return {s: 1 / len(symbols) for s in symbols}
+        log.warning("Vol-weighted total is zero; falling back to equal weights")
+        return equal
     normalized = {s: w / total for s, w in raw.items()}
 
-    bounded = {
-        s: max(MIN_WEIGHT_WITHIN_SLEEVE, min(MAX_WEIGHT_WITHIN_SLEEVE, w))
-        for s, w in normalized.items()
-    }
-    total_bounded = sum(bounded.values())
-    return {s: w / total_bounded for s, w in bounded.items()}
+    return _waterfill_clip(
+        normalized,
+        min_weight=weighting_cfg.min_weight_within_sleeve,
+        max_weight=weighting_cfg.max_weight_within_sleeve,
+    )
 
 
 def evaluate_regime(
@@ -182,12 +281,12 @@ def compute_target_values(
     targets: Dict[str, float] = {}
 
     trunk_value = portfolio_value * cfg.allocation.trunk.weight * risk_mult
-    trunk_weights = compute_sleeve_weights(cfg.allocation.trunk, historical_prices)
+    trunk_weights = compute_sleeve_weights(cfg.allocation.trunk, historical_prices, cfg.weighting)
     for symbol, w in trunk_weights.items():
         targets[symbol] = trunk_value * w
 
     branches_value = portfolio_value * cfg.allocation.branches.weight * risk_mult
-    branches_weights = compute_sleeve_weights(cfg.allocation.branches, historical_prices)
+    branches_weights = compute_sleeve_weights(cfg.allocation.branches, historical_prices, cfg.weighting)
     for symbol, w in branches_weights.items():
         targets[symbol] = branches_value * w
 

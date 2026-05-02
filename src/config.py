@@ -73,6 +73,26 @@ class AllocationConfig(BaseModel):
         return self
 
 
+class WeightingConfig(BaseModel):
+    """Parameters for inverse-volatility sleeve weighting.
+
+    Defaults match the prior hardcoded constants in strategy.py. Add a
+    `weighting:` block to strategy.yaml to override; otherwise defaults apply.
+    """
+    vol_window_days: int = Field(90, ge=10, le=500)
+    min_weight_within_sleeve: float = Field(0.05, ge=0, le=1)
+    max_weight_within_sleeve: float = Field(0.40, ge=0, le=1)
+
+    @model_validator(mode="after")
+    def bounds_consistent(self):
+        if self.min_weight_within_sleeve >= self.max_weight_within_sleeve:
+            raise ValueError(
+                f"min_weight_within_sleeve ({self.min_weight_within_sleeve}) must be < "
+                f"max_weight_within_sleeve ({self.max_weight_within_sleeve})"
+            )
+        return self
+
+
 class RegimeConfig(BaseModel):
     enabled: bool = False
     benchmark: str = "SPY"
@@ -99,6 +119,7 @@ class PortfolioConfig(BaseModel):
 class StrategyConfig(BaseModel):
     portfolio: PortfolioConfig
     allocation: AllocationConfig
+    weighting: WeightingConfig = Field(default_factory=WeightingConfig)
     rebalance: RebalanceConfig
     risk: RiskConfig
     regime: RegimeConfig = Field(default_factory=RegimeConfig)
