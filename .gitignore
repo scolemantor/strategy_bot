@@ -16,4 +16,9 @@ htmlcov/
 build/
 dist/
 backtest_output/
-data_cache/
+data_cache/data_cache/  
+*.pre_phase3  
+deploy_phase3.py 
+test*.txt
+backtest_output.txt
+data_cache

@@ -1,41 +1,43 @@
 # Oak strategy configuration
-# Edit the branches holdings to match your actual conviction picks.
-
+# Phase 3 version: vol weighting + regime detection (defensive tagging + whipsaw protection)
 portfolio:
   total_target_value_usd: 200000
-
 allocation:
-  # 50% trunk - tilted toward US equities for this experiment
   trunk:
-    weight: 0.50
+    weight: 0.70
+    weighting_method: equal
     holdings:
-      VTI: 0.70
-      VXUS: 0.10
-      BND: 0.10
-      GLD: 0.10
-
-  # 35% branches - thematic conviction holdings
+      VTI:  { weight: 0.80, risk_class: equity }
+      BIL:  { weight: 0.10, risk_class: defensive }
+      GLD:  { weight: 0.10, risk_class: defensive }
   branches:
-    weight: 0.35
+    weight: 0.20
+    weighting_method: inverse_volatility
     holdings:
-      SMH: 0.143
-      XLU: 0.143
-      ITA: 0.143
-      IHI: 0.143
-      PAVE: 0.143
-      INDA: 0.143
-      COPX: 0.142
-
-  # 15% acorns - held as cash in Phase 1, managed manually
+      SMH: 1.0
+      XLU: 1.0
+      ITA: 1.0
+      IHI: 1.0
+      PAVE: 1.0
+      INDA: 1.0
+      COPX: 1.0
   acorns:
-    weight: 0.15
-
+    weight: 0.10
+regime:
+  enabled: true
+  benchmark: SPY
+  ma_window: 200
+  offsignal_cash_pct: 0.40
+  buffer_pct: 0.02
+  min_consecutive_days: 3
 rebalance:
   drift_threshold: 0.05
   min_order_size_usd: 100
-
 risk:
   max_order_pct_of_portfolio: 0.05
   max_daily_orders: 20
   drawdown_kill_switch_pct: 0.05
   require_market_hours: true
+ledger:
+  enabled: true
+  db_path: "~/strategy_bot_data/lot_ledger.sqlite"
