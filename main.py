@@ -17,18 +17,29 @@ Tax-aware lot ledger (Phase 3):
 
   Dry runs do not touch the ledger.
   When `ledger.enabled: false` (default), the bot runs exactly as pre-Phase-3.
+
+Live regime + vol weighting:
+  When the strategy needs history (regime enabled OR any sleeve uses
+  inverse_volatility), the bot fetches enough historical bars to compute
+  the regime MA and per-symbol vol windows. The fetch is wrapped in
+  try/except so transient API issues degrade gracefully — we fall back
+  to the no-history defaults (regime ON, vol → equal) and log loudly
+  rather than crash the rebalance.
 """
 from __future__ import annotations
 
 import argparse
 import logging
 import sys
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Optional
 
+import pandas as pd
+
 from src.broker import AlpacaBroker
-from src.config import StrategyConfig, load_credentials, load_strategy
+from src.config import BrokerCredentials, StrategyConfig, load_credentials, load_strategy
+from src.data import aligned_close_prices, fetch_bars
 from src.executor import execute_orders
 from src.lot_ledger import LotLedger
 from src.lot_migration import reconcile_with_broker, seed_from_broker
@@ -46,6 +57,73 @@ def setup_logging(level: str = "INFO") -> None:
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
+
+
+def _required_history_days(cfg: StrategyConfig) -> int:
+    """How many trading days of history the strategy needs.
+
+    Vol weighting wants `vol_window_days` of returns per holding.
+    Regime wants `ma_window` days plus enough overlap for the
+    consecutive-day trigger.
+    """
+    needs = []
+    if (cfg.allocation.trunk.weighting_method == "inverse_volatility"
+            or cfg.allocation.branches.weighting_method == "inverse_volatility"):
+        needs.append(cfg.weighting.vol_window_days)
+    if cfg.regime.enabled:
+        needs.append(cfg.regime.ma_window + cfg.regime.min_consecutive_days)
+    return max(needs) if needs else 0
+
+
+def _fetch_history_for_live(
+    cfg: StrategyConfig,
+    creds: BrokerCredentials,
+) -> Optional[pd.DataFrame]:
+    """Fetch enough historical close prices for vol weighting and regime detection.
+
+    Returns None on any failure or when no history is needed. Failures are
+    logged but do not propagate — the strategy degrades to no-history defaults.
+    """
+    log = logging.getLogger("rebalance")
+
+    trading_days_needed = _required_history_days(cfg)
+    if trading_days_needed <= 0:
+        return None
+
+    # Trading days → calendar days: ~252 trading days per year, plus generous
+    # buffer for weekends, holidays, and the extra returns we lose to dropna.
+    calendar_days = int(trading_days_needed * 1.5) + 30
+
+    fetch_symbols = set(cfg.all_tracked_symbols())
+    if cfg.regime.enabled:
+        fetch_symbols.add(cfg.regime.benchmark)
+    fetch_symbols = sorted(fetch_symbols)
+
+    end = date.today()
+    start = end - timedelta(days=calendar_days)
+
+    log.info(
+        f"Fetching {calendar_days} calendar days of history for "
+        f"{len(fetch_symbols)} symbols (vol/regime inputs)"
+    )
+
+    try:
+        bars = fetch_bars(fetch_symbols, start, end, creds, use_cache=True)
+        closes = aligned_close_prices(bars)
+        if closes.empty:
+            log.warning(
+                "Historical price fetch returned no data; "
+                "vol/regime will fall back to defaults"
+            )
+            return None
+        return closes
+    except Exception as e:
+        log.error(
+            f"Historical price fetch FAILED: {e}. "
+            f"Vol/regime will fall back to defaults (regime ON, equal weights). "
+            f"Investigate before next rebalance."
+        )
+        return None
 
 
 def cmd_status(broker: AlpacaBroker, cfg: StrategyConfig) -> None:
@@ -84,6 +162,7 @@ def cmd_status(broker: AlpacaBroker, cfg: StrategyConfig) -> None:
 def cmd_rebalance(
     broker: AlpacaBroker,
     cfg: StrategyConfig,
+    creds: BrokerCredentials,
     dry_run: bool,
     seeding_mode: bool = False,
     ledger: Optional[LotLedger] = None,
@@ -124,6 +203,9 @@ def cmd_rebalance(
             print()
             sys.exit(2)
 
+    # Fetch historical prices for vol weighting + regime detection
+    historical_prices = _fetch_history_for_live(cfg, creds)
+
     tracked = cfg.all_tracked_symbols()
     log.info(f"Fetching quotes for {len(tracked)} symbols")
     quotes = broker.get_quotes(tracked)
@@ -132,7 +214,10 @@ def cmd_rebalance(
     if missing_quotes:
         log.warning(f"Missing quotes for: {missing_quotes} - those holdings will be skipped")
 
-    orders = compute_rebalance_orders(positions, account.portfolio_value, quotes, cfg)
+    orders = compute_rebalance_orders(
+        positions, account.portfolio_value, quotes, cfg,
+        historical_prices=historical_prices,
+    )
     log.info(f"Strategy proposes {len(orders)} order(s)")
 
     if not orders:
@@ -250,7 +335,7 @@ def main() -> None:
         cmd_status(broker, cfg)
     elif args.command == "rebalance":
         cmd_rebalance(
-            broker, cfg,
+            broker, cfg, creds,
             dry_run=not args.execute,
             seeding_mode=args.seeding,
             ledger=ledger,
