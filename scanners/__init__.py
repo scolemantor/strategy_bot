@@ -7,11 +7,13 @@ from .base import Scanner
 from .breakout_52w import Breakout52wScanner
 from .earnings_drift import EarningsDriftScanner
 from .insider_buying import InsiderBuyingScanner
+from .spinoff_tracker import SpinoffTrackerScanner
 
 SCANNERS: Dict[str, Type[Scanner]] = {
     "insider_buying": InsiderBuyingScanner,
     "breakout_52w": Breakout52wScanner,
     "earnings_drift": EarningsDriftScanner,
+    "spinoff_tracker": SpinoffTrackerScanner,
 }
 
 
