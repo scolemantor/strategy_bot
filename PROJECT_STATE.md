@@ -2,7 +2,7 @@
 
 > Living document. Update at the end of every working session.
 
-**Last updated:** 2026-05-03 (morning, post-Phase-4a-night-1)
+**Last updated:** 2026-05-03 (afternoon, post-Phase-4a-complete)
 **Repo:** github.com/scolemantor/strategy_bot
 **Account:** Alpaca paper, $200k notional, seeded 2026-05-01 11:57am ET
 
@@ -11,7 +11,8 @@
 ## TL;DR
 
 - **Phases 1, 2, 3:** DONE. Phase 3 merged 2026-05-02.
-- **Phase 4a:** 4 of 17 scanners shipped. Scanners 1-4 working with real candidates. 13 scanners remaining (9 free-data, 4 paid-data).
+- **Phase 4a:** COMPLETE. 13 of 13 free-data scanners shipped 2026-05-03.
+- **Phase 4g:** 4 paid-data scanners (#14-17) deferred pending subscription decisions.
 - **Phases 5-12:** not started.
 - **181 tests passing.**
 - **V3 portfolio:** 7.4% CAGR, -17.2% max DD, Sharpe 0.68 over 5y. Beats SPY's risk-adjusted return.
@@ -70,23 +71,23 @@ Historical bar fetcher with parquet caching, backtest engine with 5bps slippage,
 
 Architecture is set. Output is read-only CSVs. No scanner places orders, ever.
 
-**Full 17-scanner build is locked. No scanner is being skipped, ever.** Free-data scanners ship first (4a), paid-data scanners ship after subscription decisions (4g).
+**Full 17-scanner build is locked. No scanner is being skipped, ever.** Free-data scanners (4a) complete. Paid-data scanners (4g) ship after subscription decisions.
 
-### 4a — Free-data scanners (4 of 13 shipped)
+### 4a — Free-data scanners (13 of 13 SHIPPED 2026-05-03)
 
-- `[x]` **#1 insider_buying** — SEC Form 4 cluster buys. 19 candidates this run (CHTR, ABT, GEHC, WASH, AVLN). XSL-stripping fix applied 2026-05-02.
-- `[x]` **#2 breakout_52w** — Alpaca bars, new 52w highs. 155 candidates (TWLO, NVT, MXL, BAND). Universe truncation, batching, lookback gates, sanity caps all fixed 2026-05-02.
-- `[x]` **#3 earnings_drift** — yfinance, post-earnings drift. 20+ candidates including textbook PEAD: CIEN +82% in 57d on 16% beat, MU +22% in 44d on 33% beat, HPE +36% in 53d on 11% beat. S&P 500 universe + parquet cache + sanity caps applied 2026-05-02.
-- `[x]` **#4 spinoff_tracker** — SEC Form 10/10-12B/10-12G. 14 candidates after 3 filters (name patterns, CIK age, parent 8-K cross-reference). Real wins: FDXF (parent FDX), HONA (parent HON), Enviri II (parent NVRI), VSNT (parent CCZ), USDW (parent IPW), Augusta SpinCo (parent WAT). Built 2026-05-03.
-- `[ ]` **#5 fda_calendar** — small/mid biotech with PDUFA decisions in 30-90 day window
-- `[ ]` **#6 thirteen_f_changes** — institutional holdings (curated smart-money fund list, reuses SEC pipeline)
-- `[ ]` **#7 short_squeeze** — high SI + days-to-cover + positive momentum
-- `[ ]` **#8 small_cap_value** — Greenblatt-style fundamentals screen
-- `[ ]` **#9 sector_rotation** — sector ETF relative strength vs SPY
-- `[ ]` **#10 earnings_calendar** — companies reporting next 5 trading days
-- `[ ]` **#11 macro_calendar** — FOMC/CPI/NFP/Treasury auctions
-- `[ ]` **#12 ipo_lockup** — IPO lockup expirations and post-expiry bounce setups
-- `[ ]` **#13 insider_selling_clusters** — negative signal, exclusion list, reuses #1's cache
+- `[x]` **#1 insider_buying** — SEC Form 4 cluster buys (2+ insiders, $5K min). 19 candidates first run (CHTR, ABT, GEHC, WASH, AVLN). XSL-stripping fix applied.
+- `[x]` **#2 breakout_52w** — Alpaca bars, new 52w highs on above-avg volume. 155 candidates (TWLO, NVT, MXL, BAND). Universe truncation, batching, lookback gates, sanity caps fixed.
+- `[x]` **#3 earnings_drift** — yfinance, post-earnings drift on big beats. 20+ candidates (CIEN +82%, MU +22%, HPE +36%). S&P 500 universe + parquet cache + sanity caps.
+- `[x]` **#4 spinoff_tracker** — SEC Form 10/10-12B/10-12G. 14 candidates after 3 filters (name patterns, CIK age, parent 8-K cross-reference). FDXF/HONA/Enviri II all surfaced.
+- `[x]` **#5 fda_calendar** — RTTNews scrape for small/mid biotech PDUFA decisions in 30-90 day window. 8 setups (ARVN, SPRO, ACHV, UNCY).
+- `[x]` **#6 thirteen_f_changes** — SEC Form 13F-HR for 22 curated smart-money funds (Berkshire, Pershing Square, Lone Pine, Coatue, Tiger Global, etc) + OpenFIGI CUSIP→ticker. 20 conviction signals: Pershing META 1.76B new, Pershing AMZN +65%, Coatue NFLX/AMAT/DASH adds, Lone Pine 7-name conviction list. Citadel/Millennium/Two Sigma removed (market-makers, not signals).
+- `[x]` **#7 short_squeeze** — FINRA short interest + yfinance float + Alpaca momentum. 14 candidates: WOLF +110% active squeeze, DBI 12.4 DTC, SG, SPHR, KSS, NMAX. ACORNS SLEEVE ONLY.
+- `[x]` **#8 small_cap_value** — yfinance fundamentals + S&P 1500 universe. P/E<12, P/B<1.5, EV/EBITDA<8, D/E<1, FCF>0, mcap $300M-3B. 3 candidates (VRTS, AMPH, INVA) — tight by design in late-cycle market.
+- `[x]` **#9 sector_rotation** — Alpaca SPDR ETFs (XLF/XLK/XLE/XLV/XLI/XLP/XLY/XLU/XLB/XLRE/XLC) vs SPY 1m/3m relative strength. 1 candidate XLK Technology +10% RS 1m, accelerating. (6m signal dropped — Alpaca unadjusted prices unreliable for ETFs over long lookback.)
+- `[x]` **#10 earnings_calendar** — yfinance Ticker.calendar + earnings_dates + Alpaca bars for historical 3-day post-earnings move. 361 candidates reporting next 5 trading days, ranked by avg ±% magnitude. Top picks: SEZL ±35%, LUMN ±27%, APP ±23%, PLTR ±13% reporting tomorrow. PRE-EARNINGS RISK AWARENESS, not directional.
+- `[x]` **#11 macro_calendar** — pure date math (zero APIs). FOMC dates hardcoded from federalreserve.gov, BLS releases computed from monthly patterns (NFP=1st Fri, CPI=2nd Wed, PPI=day before CPI, GDP=last Thu Jan/Apr/Jul/Oct, Jobless Claims=every Thursday). 4 events surfaced for May 3-17: PPI May 12, CPI May 13 (the actionable one), Initial Jobless Claims May 7+14. Most reliable scanner in suite.
+- `[x]` **#12 ipo_lockup** — stockanalysis.com scrape. 467 IPOs from 2025+2026 → 9 final candidates after SPAC filter + price + return-since-IPO filters. 180-day lockup expiring 0-60 days. Real wins: BETA Technologies eVTOL -52% lockup TODAY, AERO Aeromexico -22% lockup Tuesday, WLTH Wealthfront -23% June 10. ACORNS SLEEVE ONLY.
+- `[x]` **#13 insider_selling_clusters** — SEC Form 4 cluster sells (2+ insiders, $1M+ aggregate). Subclasses scanner #1 to reuse 100% of plumbing. 62 candidates: TXN 12 insiders $113.7M (extraordinary), CRWV 6 insiders $2.9 BILLION (post-IPO lockup dump confirming #12 thesis), ELF 6 insiders $20M, URI 4 insiders $51M, UTHR 3 insiders $113M.
 
 ### 4b — Investability filter (NOT STARTED)
 
@@ -101,11 +102,12 @@ Universal quality gate every scanner result passes through.
 
 ### 4c — Cross-scanner meta-ranker (NOT STARTED)
 
-- `[ ]` Aggregator (load all scanner CSVs, build master DataFrame keyed on ticker)
+- `[ ]` Aggregator (load all 13 scanner CSVs, build master DataFrame keyed on ticker)
 - `[ ]` Signal vector per ticker (boolean flags + per-scanner score)
 - `[ ]` Composite scoring (weighted sum + multi-signal bonus + category diversity)
 - `[ ]` `scan_output/<date>/master_ranked.csv` output
 - `[ ]` Configurable signal weights (`config/scanner_weights.yaml`)
+- `[ ]` Conflict detection (e.g. scanner #1 buy + scanner #13 sell on same ticker)
 
 ### 4d — Watchlist tracker
 
@@ -133,7 +135,7 @@ Identified during Phase 3 work, need to land before Phase 5.
 
 These four scanners require paid data feeds. **All four ship.** The build sequence: subscribe to feed → write client wrapper → write scanner → validate → register. Same pattern as #1-13.
 
-Subscription decisions to be made when 4a is complete and we know which signals matter most.
+Subscription decisions to be made with 4a complete and clear view of which signals matter most.
 
 - `[ ]` **#14 options_unusual** — Unusual Whales / FlowAlgo / OptionStrat
   - Signal: calls bought above ask >5x average daily volume
@@ -214,6 +216,7 @@ Momentum filter on conviction holdings. Treat with skepticism.
 - `[ ]` Backtest across regimes
 - `[ ]` Configuration: `config/branch_signals.yaml`
 - `[ ]` Override flag for buy-the-dip moments
+- `[ ]` Scanner #9 sector_rotation feeds into branch overweighting decisions here
 
 ## ⬜ Phase 10: Portfolio-Level Vol Targeting
 
@@ -242,14 +245,14 @@ Highest-risk feature. Build Phase 4 manual workflow first, run for 6+ months, en
 
 # Sequencing
 
-### Phase 4a — free-data scanners (in progress)
-4 shipped night 1. 9 left. ~1-2 per session = 5-9 more sessions.
+### Phase 4a — DONE
+13 scanners shipped 2026-05-03 in single multi-session push.
 
 ### Phase 4b/c/d/e/f — supporting infrastructure
-After 4a complete. Each is its own multi-session build.
+Now unblocked. Each is its own multi-session build. Likely order: 4c (meta-ranker, immediately useful) → 4b (investability filter, depends on having scanner outputs to filter) → 4d (watchlist) → 4e (backtest weighting) → 4f (Phase 3 retroactive).
 
 ### Phase 4g — paid-data scanners
-After 4a + subscription decisions made. Subscribe → build → ship. 4 scanners, plan for 1-2 sessions each.
+After subscription decisions made. 4 scanners, plan for 1-2 sessions each.
 
 ### Phases 5-7 — production readiness
 Logging → alerting → deployment. Required before any real money.
@@ -265,7 +268,7 @@ Run in parallel with paper observation period.
 2. Read this file
 3. Check `scan_output/` for any new scanner CSVs
 4. Run `python -m pytest tests/ -q` (should be 181 passing)
-5. Pick from current phase's checklist — next up is #5 fda_calendar
+5. Pick from current phase's checklist — 4a complete, ready for 4b/c/d/e/f decision
 6. End of session: update this file's "Last updated" + checkboxes, commit
 
 ---
@@ -278,4 +281,8 @@ Run in parallel with paper observation period.
 - **Quote-based ledger writes.** Paper-grade. Real money needs fill-status polling (7a).
 - **VXUS/BND still in paper account.** Auto-liquidation will sell them at next executed rebalance. Need wind-down feature first (7a).
 - **Spinoff tracker false-positive parents.** Filter #3 occasionally matches the wrong parent CIK on coincidental name collisions. Acceptable for v1.
+- **Sector rotation 6m signal unreliable.** Alpaca returns unadjusted prices for some ETFs; 6m returns nonsensical when distributions/splits in window. Dropped from scoring; output kept for diagnostic only.
+- **Macro calendar needs 2027 FOMC dates.** Currently only 2026 hardcoded. Update when Fed publishes 2027 schedule (typically late 2026).
+- **IPO lockup assumes 180-day convention.** Real lockup terms vary (90/180/365 day). Doesn't read S-1 filings to verify; doesn't check for early-release waivers.
+- **Insider selling can't filter 10b5-1 plans.** Parsed Form 4 data doesn't extract the plan flag. Cluster requirement (2+ insiders) + $1M aggregate filter most routine sales.
 - **Phase 11 fundamentally hard.** Most retail systematic strategies fail at the rules-encoding step. Treat with extreme skepticism.
