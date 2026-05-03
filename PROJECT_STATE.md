@@ -2,7 +2,7 @@
 
 > Living document. Update at the end of every working session.
 
-**Last updated:** 2026-05-02 (post-Phase-3-merge)
+**Last updated:** 2026-05-03 (morning, post-Phase-4a-night-1)
 **Repo:** github.com/scolemantor/strategy_bot
 **Account:** Alpaca paper, $200k notional, seeded 2026-05-01 11:57am ET
 
@@ -10,11 +10,11 @@
 
 ## TL;DR
 
-- **Phase 1, 2, 3:** DONE. Phase 3 merged to main 2026-05-02.
-- **Phase 4:** IN PROGRESS. Scanner #1 (insider_buying) currently validating against live SEC data.
-- **Phases 5-12:** not started, fully detailed below.
+- **Phases 1, 2, 3:** DONE. Phase 3 merged 2026-05-02.
+- **Phase 4a:** 4 of 17 scanners shipped. Scanners 1-4 working with real candidates. 13 scanners remaining (9 free-data, 4 paid-data).
+- **Phases 5-12:** not started.
 - **181 tests passing.**
-- **V3 portfolio:** 7.4% CAGR, -17.2% max DD, Sharpe 0.68 over 5y. Beats SPY's risk-adjusted return for the period.
+- **V3 portfolio:** 7.4% CAGR, -17.2% max DD, Sharpe 0.68 over 5y. Beats SPY's risk-adjusted return.
 
 ---
 
@@ -32,7 +32,7 @@
 - Auto-liquidation of held positions outside YAML allocation
 - Tax-aware lot ledger (HIFO + long-term preference + losses-first) live and seeded against paper account
 
-**Paper account positions (as of 2026-05-01):** Still holds VXUS and BND from V1 seeding. Auto-liquidation will sell them at next executed rebalance window. Risk manager will reject single-shot liquidation in real money since each is ~5% of portfolio — wind-down logic needed before live (see Phase 7).
+**Paper account positions (as of 2026-05-01):** Still holds VXUS and BND from V1 seeding. Auto-liquidation will sell them at next executed rebalance window. Risk manager will reject single-shot liquidation in real money since each is ~5% of portfolio — wind-down logic needed before live (see Phase 7a).
 
 ---
 
@@ -40,7 +40,7 @@
 
 - **Code:** GitHub. Pull at session start, commit + push at session end.
 - **Cache:** `data_cache/` symlinked to `G:\My Drive\strategy_bot_cache\data_cache\` on both machines.
-- **Scan output:** `scan_output/` symlinked to `G:\My Drive\strategy_bot_cache\scan_output\` on both machines (added 2026-05-02).
+- **Scan output:** `scan_output/` symlinked to `G:\My Drive\strategy_bot_cache\scan_output\` on both machines.
 - **`.env`:** machine-local, never synced. Paper keys regenerated 2026-05-01 after accidental exposure.
 
 ---
@@ -49,66 +49,46 @@
 
 ## ✅ Phase 1: Live Skeleton — DONE
 
-CLI rebalancer with Alpaca integration.
-- `[x]` Project structure (src/, config/, tests/)
-- `[x]` Pydantic config validation
-- `[x]` Alpaca broker wrapper
-- `[x]` Oak rebalancer (target weights, drift, order generation)
-- `[x]` Risk manager (position size cap, market-hours check, drawdown kill switch)
-- `[x]` Order executor with dry-run default
-- `[x]` CLI: `python main.py status`, `python main.py rebalance [--execute] [--seeding]`
-- `[x]` Live-trading confirmation prompts
-- `[x]` Validated: paper account seeded 2026-05-01, 11 positions filled at 0% drift
+CLI rebalancer with Alpaca integration. 11 positions seeded paper account 2026-05-01 at 0% drift.
 
 ## ✅ Phase 2: Backtest Harness — DONE
 
-- `[x]` Historical bar fetcher with parquet caching
-- `[x]` Backtest engine with slippage simulation (5bps)
-- `[x]` Performance stats (CAGR, Sharpe, max drawdown, vol)
-- `[x]` Buy-and-hold benchmark comparison
-- `[x]` CSV output (equity_curve.csv, trades.csv)
-- `[x]` CLI: `python backtest.py [--start] [--end] [--capital] [--frequency] [--benchmark]`
+Historical bar fetcher with parquet caching, backtest engine with 5bps slippage, CAGR/Sharpe/DD stats, benchmark comparison.
 
 ## ✅ Phase 3: Strategy Enhancements — DONE (15 commits, merged 2026-05-02)
 
-- `[x]` Volatility-weighted position sizing with iterative water-fill clipping
-- `[x]` Regime detection: SPY 200dma overlay with 2% buffer + 3-day confirmation
-- `[x]` Defensive tagging: per-holding `risk_class: equity | defensive`
-- `[x]` Backtest engine wired to pass historical_prices
-- `[x]` Live rebalancer wired to fetch historical_prices (was previously running with regime always-ON, equal-weight branches)
-- `[x]` V3 portfolio retune: 70/20/10 sleeves, drop VXUS, BND→BIL
-- `[x]` Tax-aware lot ledger (SQLite, immutable lots + append-only consumptions)
-- `[x]` Tax-aware lot selection (ST loss → LT loss → LT HIFO → ST HIFO)
-- `[x]` Migration + reconciliation against broker positions
-- `[x]` Wire ledger into executor and main loop
-- `[x]` Auto-liquidate held positions outside YAML allocation
-- `[x]` Phase 3 deferred: drawdown circuit breaker DROPPED (regime detection covers same need)
+- Vol-weighted branches with iterative water-fill clipping
+- Regime detection (SPY 200dma + 2% buffer + 3-day confirmation)
+- Defensive tagging (BIL/GLD held flat during regime-off)
+- V3 portfolio retune to 70/20/10 (drop VXUS, BND→BIL)
+- Tax-aware lot ledger (SQLite, immutable lots, append-only consumptions, ST loss → LT loss → LT HIFO → ST HIFO selection)
+- Migration + reconciliation against broker positions
+- Auto-liquidation of held positions outside YAML
+- Drawdown circuit breaker DROPPED (regime detection covers it)
 
 ## 🔄 Phase 4: Acorns Idea-Generation Scanner — IN PROGRESS
 
 Architecture is set. Output is read-only CSVs. No scanner places orders, ever.
 
-### 4a — Individual scanners (1 of 13 buildable in progress)
+**Full 17-scanner build is locked. No scanner is being skipped, ever.** Free-data scanners ship first (4a), paid-data scanners ship after subscription decisions (4g).
 
-- `[~]` #1 insider_buying — running 2026-05-02, validating output
-- `[ ]` #2 breakout_52w — has universe-truncation bug (alphabetical cap at A-HYR cuts MSFT/NVDA/META). Fix: sort universe by market cap or dollar volume before truncating, or raise cap to full ~11,694
-- `[ ]` #3 earnings_drift — needs `pip install yfinance`. ~7-8 min runtime
-- `[ ]` #4 spinoff_tracker — reuses SEC EDGAR pipeline
-- `[ ]` #5 fda_calendar
-- `[ ]` #6 thirteen_f_changes
-- `[ ]` #7 short_squeeze
-- `[ ]` #8 small_cap_value
-- `[ ]` #9 sector_rotation
-- `[ ]` #10 earnings_calendar
-- `[ ]` #11 macro_calendar
-- `[ ]` #12 ipo_lockup
-- `[ ]` #13 insider_selling_clusters (negative signal, exclusion list, reuses #1's cache)
-- `[B]` #14 options_unusual — paid data
-- `[B]` #15 crypto_onchain — paid data
-- `[B]` #16 sentiment — fragmented sources
-- `[B]` #17 ma_rumors — paid news API
+### 4a — Free-data scanners (4 of 13 shipped)
 
-### 4b — Investability filter
+- `[x]` **#1 insider_buying** — SEC Form 4 cluster buys. 19 candidates this run (CHTR, ABT, GEHC, WASH, AVLN). XSL-stripping fix applied 2026-05-02.
+- `[x]` **#2 breakout_52w** — Alpaca bars, new 52w highs. 155 candidates (TWLO, NVT, MXL, BAND). Universe truncation, batching, lookback gates, sanity caps all fixed 2026-05-02.
+- `[x]` **#3 earnings_drift** — yfinance, post-earnings drift. 20+ candidates including textbook PEAD: CIEN +82% in 57d on 16% beat, MU +22% in 44d on 33% beat, HPE +36% in 53d on 11% beat. S&P 500 universe + parquet cache + sanity caps applied 2026-05-02.
+- `[x]` **#4 spinoff_tracker** — SEC Form 10/10-12B/10-12G. 14 candidates after 3 filters (name patterns, CIK age, parent 8-K cross-reference). Real wins: FDXF (parent FDX), HONA (parent HON), Enviri II (parent NVRI), VSNT (parent CCZ), USDW (parent IPW), Augusta SpinCo (parent WAT). Built 2026-05-03.
+- `[ ]` **#5 fda_calendar** — small/mid biotech with PDUFA decisions in 30-90 day window
+- `[ ]` **#6 thirteen_f_changes** — institutional holdings (curated smart-money fund list, reuses SEC pipeline)
+- `[ ]` **#7 short_squeeze** — high SI + days-to-cover + positive momentum
+- `[ ]` **#8 small_cap_value** — Greenblatt-style fundamentals screen
+- `[ ]` **#9 sector_rotation** — sector ETF relative strength vs SPY
+- `[ ]` **#10 earnings_calendar** — companies reporting next 5 trading days
+- `[ ]` **#11 macro_calendar** — FOMC/CPI/NFP/Treasury auctions
+- `[ ]` **#12 ipo_lockup** — IPO lockup expirations and post-expiry bounce setups
+- `[ ]` **#13 insider_selling_clusters** — negative signal, exclusion list, reuses #1's cache
+
+### 4b — Investability filter (NOT STARTED)
 
 Universal quality gate every scanner result passes through.
 - `[ ]` Market cap floor (configurable: $300M / $50M / $10M tiers)
@@ -119,10 +99,10 @@ Universal quality gate every scanner result passes through.
 - `[ ]` Hard exclusions list (manually maintained)
 - `[ ]` Filtered-out audit trail (separate `rejected.csv`)
 
-### 4c — Cross-scanner meta-ranker
+### 4c — Cross-scanner meta-ranker (NOT STARTED)
 
 - `[ ]` Aggregator (load all scanner CSVs, build master DataFrame keyed on ticker)
-- `[ ]` Signal vector per ticker (boolean flags per scanner + per-scanner score)
+- `[ ]` Signal vector per ticker (boolean flags + per-scanner score)
 - `[ ]` Composite scoring (weighted sum + multi-signal bonus + category diversity)
 - `[ ]` `scan_output/<date>/master_ranked.csv` output
 - `[ ]` Configurable signal weights (`config/scanner_weights.yaml`)
@@ -143,200 +123,159 @@ Universal quality gate every scanner result passes through.
 - `[ ]` Drift detection (signals that decay over time)
 - `[ ]` Output: per-scanner edge report with confidence intervals
 
-### 4f — Phase 3 retroactive items (added to Phase 4)
+### 4f — Phase 3 retroactive items
 
-These got identified during Phase 3 work and need to land before Phase 5 or they'll keep biting.
+Identified during Phase 3 work, need to land before Phase 5.
 - `[ ]` Phase 3 regime params backtest sweep: try (buffer, days) combinations of (0.01, 2), (0.02, 3), (0.03, 5), (0.05, 5). Pick combination that maximizes Sharpe net of tax drag.
-- `[ ]` Trunk allocation re-evaluation after Phase 4 scanners are producing alpha. If scanner-driven branches don't add edge, revisit whether 70/20/10 is still right.
+- `[ ]` Trunk allocation re-evaluation after scanners are producing alpha. If scanner-driven branches don't add edge, revisit whether 70/20/10 is still right.
+
+### 4g — Paid-data scanners (NOT STARTED — subscriptions pending)
+
+These four scanners require paid data feeds. **All four ship.** The build sequence: subscribe to feed → write client wrapper → write scanner → validate → register. Same pattern as #1-13.
+
+Subscription decisions to be made when 4a is complete and we know which signals matter most.
+
+- `[ ]` **#14 options_unusual** — Unusual Whales / FlowAlgo / OptionStrat
+  - Signal: calls bought above ask >5x average daily volume
+  - Cost: $50-200/mo
+  - Build: API client → scanner → output CSV with ticker, contract, premium, OI change
+- `[ ]` **#15 crypto_onchain** — Glassnode / CoinMetrics paid tier
+  - Signal: on-chain accumulation patterns for major crypto + crypto-adjacent equities (COIN, MSTR, MARA, RIOT)
+  - Cost: $30-100/mo
+  - Build: API client → metric tracker → equity proxy mapper → output CSV
+- `[ ]` **#16 sentiment** — Reddit (PRAW) + Google Trends + StockTwits unified pipeline
+  - Signal: spike in retail sentiment / mention volume per ticker
+  - Cost: API access mostly free, but multi-source pipeline is the engineering cost (multi-week build)
+  - Build: per-source fetchers → unified ticker extraction → mention-volume baseline → spike detection
+- `[ ]` **#17 ma_rumors** — Bloomberg / Reuters / Benzinga news API
+  - Signal: M&A rumor mentions for buyout candidates trading below potential takeout price
+  - Cost: $100-500/mo (Benzinga is cheapest, Bloomberg most expensive)
+  - Build: news API client → NER for ticker + acquirer extraction → rumor-vs-confirmed classification → output CSV
 
 ## ⬜ Phase 5: Persistent Logging
 
 Bot currently logs to terminal only. Won't work on a server.
-- `[ ]` Structured JSON Lines logging to disk (one file per day: `logs/2026-05-01.jsonl`)
+- `[ ]` Structured JSON Lines logging to disk (`logs/2026-05-01.jsonl`)
 - `[ ]` Every event: timestamp, severity, component, action, before/after state, request IDs
 - `[ ]` Order audit log: dedicated `logs/orders.jsonl`, never auto-rotated
 - `[ ]` Scanner output history: every scan archived to `scan_output/archive/`
-- `[ ]` Rebalance history: each run gets a JSON record with proposed orders, executed orders, drift state, regime at time of run
-- `[ ]` Log rotation: daily files, gzipped after 7 days, deleted after 90 days (configurable)
+- `[ ]` Rebalance history with proposed orders, executed orders, drift state, regime
+- `[ ]` Log rotation (daily files, gzipped after 7d, deleted after 90d)
 - `[ ]` Log query CLI: `python logs.py query --action order --since 2026-04-01 --ticker VTI`
-- `[ ]` Critical events stay forever (orders, kill-switch trips, errors)
-- `[ ]` Sensitive fields redacted (no API keys, no full account numbers)
+- `[ ]` Critical events stay forever
+- `[ ]` Sensitive fields redacted
 
 ## ⬜ Phase 6: Alerting & Notifications
 
-Need to know when things happen without watching a terminal. Required for Phase 7 deployment.
-- `[ ]` Notification channel config: email, Slack, both, or other (Discord, Telegram, ntfy.sh)
-- `[ ]` Critical alerts (always on):
-  - Kill switch tripped
-  - Drawdown threshold breached
-  - Order placement failed
-  - Authentication failure
-  - Unhandled exception in any phase
-- `[ ]` Operational alerts (configurable):
-  - Daily summary (portfolio value, top movers, drift, regime, scanners run)
-  - Rebalance occurred (orders, fills, slippage)
-  - Scanner finished with N candidates above threshold
-  - Watchlist saw new signal
-- `[ ]` Daily digest format (human-readable email)
+Required for Phase 7 deployment.
+- `[ ]` Notification channel config (email, Slack, both, or other)
+- `[ ]` Critical alerts: kill switch, drawdown breach, order failure, auth failure, unhandled exception
+- `[ ]` Operational alerts: daily summary, rebalance occurred, scanner finished, watchlist signal
+- `[ ]` Daily digest email format
 - `[ ]` Slack integration via webhook
-- `[ ]` Email integration via SMTP (Gmail app password)
-- `[ ]` Quiet hours config (user is night owl, may invert default)
+- `[ ]` Email integration via SMTP
+- `[ ]` Quiet hours config
 - `[ ]` Rate limiting (no more than N alerts/hour)
-- `[ ]` Alert deduplication (same error within 1hr bundled)
-- `[ ]` Test mode: `python alerts.py test`
+- `[ ]` Alert deduplication
+- `[ ]` Test mode
 
 ## ⬜ Phase 7: Production Deployment
 
-- `[ ]` Persistent state store (drawdown high-water mark, last-run timestamps, request IDs)
+- `[ ]` Persistent state store (drawdown HWM, last-run timestamps, request IDs)
 - `[ ]` Dockerfile (one-command deploy)
 - `[ ]` Cloud VM provisioning (Hetzner or DigitalOcean ~$5-10/mo)
 - `[ ]` Cron schedule (status daily, rebalance weekly, scanners daily)
 - `[ ]` Health check endpoint / dead-man switch
 
-### 7a — Phase 3 retroactive items (added to Phase 7, required pre-live)
+### 7a — Pre-live retroactive items
 
-These showed up during Phase 3 work but only matter when going to real money.
-- `[ ]` Fill-status polling: replace quote-based ledger writes with actual fill confirmations. Currently the ledger records orders at the latest quote price when the broker accepts the order, not the actual fill. Paper-grade — real money needs accurate cost basis.
-- `[ ]` VXUS/BND wind-down logic: risk manager will reject single-shot liquidation in real money (each is ~5% of portfolio). Need a feature that recognizes "this position is being exited entirely" and paces sells across multiple rebalance windows. Required before any rebalance that would exit a position.
+Showed up during Phase 3 work, only matter at real money.
+- `[ ]` Fill-status polling: replace quote-based ledger writes with actual fill confirmations
+- `[ ]` VXUS/BND wind-down logic: pace single-shot exits across multiple rebalance windows
 
 ### 7b — Pre-live gates
 
-- `[ ]` 30-day paper observation period (no crashes, no missed rebalances, no surprise behavior)
+- `[ ]` 30-day paper observation period (no crashes, no missed rebalances)
 - `[ ]` Real-money go-live with $5-10k slice first
 - `[ ]` 30+ clean days at small size
 - `[ ]` Scale to full $200k
 
 ## ⬜ Phase 8: Operational Hardening
 
-- `[ ]` Test failure modes deliberately:
-  - Alpaca down
-  - Bad quote
-  - Broker reject
-  - VM reboot mid-rebalance
-  - Network partition
-  - Disk full
-- `[ ]` Manual override interface:
-  - Pause bot
-  - Force-rebalance
-  - Veto specific orders
-  - Read-only mode
+- `[ ]` Test failure modes deliberately (Alpaca down, bad quote, broker reject, VM reboot, network partition, disk full)
+- `[ ]` Manual override interface (pause, force-rebalance, veto orders, read-only mode)
 - `[ ]` Multi-account support (taxable + IRA + Roth)
-- `[ ]` Tax-loss harvesting:
-  - Lot-level cost basis tracking (DONE in Phase 3)
-  - Wash-sale tracking (30-day window across accounts)
-  - Substitute-asset swap pairs (VTI ↔ ITOT, etc.)
-  - Auto-harvest opportunistic losses (currently only does opportunistic during normal rebalance)
+- `[ ]` Tax-loss harvesting: wash-sale tracking, substitute-asset swap pairs, opportunistic harvest
 
 ## ⬜ Phase 9: Branches Signal Overlay
 
-Momentum filter on conviction holdings.
-- `[ ]` Signal definitions (50/200dma cross, 12-1 momentum rank, RSI<30 cooldown)
-- `[ ]` Per-branch overlay logic (each of 7 branches has own threshold)
-- `[ ]` Three response modes: skip-buys, reduce-target, full-exit
-- `[ ]` Backtest across regimes (2018 vol, 2020 crash, 2022 bear, 2023 rally)
+Momentum filter on conviction holdings. Treat with skepticism.
+- `[ ]` Signal definitions, per-branch overlay logic, three response modes
+- `[ ]` Backtest across regimes
 - `[ ]` Configuration: `config/branch_signals.yaml`
-- `[ ]` Logging when overlay triggers non-rebalance
 - `[ ]` Override flag for buy-the-dip moments
-
-**Note:** Backtests will look great in-sample, may not help live. Treat with skepticism.
 
 ## ⬜ Phase 10: Portfolio-Level Vol Targeting
 
-Continuous (vs regime's binary) scaling of total equity exposure.
-- `[ ]` Vol measure choice (30d/60d realized, EWMA, VIX-implied)
-- `[ ]` Target vol setting (12% moderate / 8% conservative)
-- `[ ]` Scaling logic (`equity = target / current`, capped 0.3x-1.5x)
-- `[ ]` Update cadence (daily/weekly/monthly)
-- `[ ]` Implementation: scale all sleeve weights proportionally, remainder to cash
-- `[ ]` Backtest comparison vs static V3 across regimes
-- `[ ]` Interaction rules with regime detector (don't compound badly)
-- `[ ]` Tax friction analysis
-
-**Note:** Probably IRA-only due to short-term capital gains in taxable accounts.
+Probably IRA-only due to tax friction in taxable accounts.
+- `[ ]` Vol measure choice, target vol setting, scaling logic, update cadence
+- `[ ]` Backtest comparison vs static V3
+- `[ ]` Interaction rules with regime detector
 
 ## ⬜ Phase 11: Acorns Sleeve Automation — High Research Bar
 
-Currently fully manual. This phase explores semi-automating.
-- `[ ]` Define rules engine (when does bot auto-allocate acorns capital?)
-- `[ ]` Position sizing per acorn (equal weight? Score-weighted? Bound max 1% of total)
-- `[ ]` Max acorn count cap (10-20 simultaneous)
-- `[ ]` Exit rules (stop loss, time-based, score decay, thesis violation)
-- `[ ]` Cooldown between acorns (1-2/week max)
-- `[ ]` Manual veto window (bot proposes EOD, executes at open unless vetoed)
-- `[ ]` Backtest the rules (multi-month research effort)
+Highest-risk feature. Build Phase 4 manual workflow first, run for 6+ months, encode judgment into rules only after seeing what works.
+- `[ ]` Rules engine, position sizing, max acorn count, exit rules
+- `[ ]` Cooldown between acorns, manual veto window
+- `[ ]` Backtest the rules (multi-month research)
 - `[ ]` Paper-trade only for 90+ days
-- `[ ]` Hard kill switch (acorns sleeve drawdown >30% freezes new buys)
-
-**Note:** Highest-risk feature. Recommend: build Phase 4 manual workflow, run for 6+ months, get feel for which signals predict winners in your hands, THEN encode judgment into rules.
+- `[ ]` Hard kill switch (drawdown >30% freezes new buys)
 
 ## ⬜ Phase 12: Custom Benchmarks
 
-- `[ ]` Benchmark presets (60/40, AOR, VTI/BND mixes)
-- `[ ]` Risk parity benchmark
-- `[ ]` Custom benchmark composer (`--benchmark "VTI:0.5,BND:0.3,GLD:0.1,VXUS:0.1"`)
-- `[ ]` Multi-benchmark output
-- `[ ]` Risk-adjusted comparisons (Sortino, info ratio, max-DD-adjusted return)
+- `[ ]` Benchmark presets, risk parity, custom composer
+- `[ ]` Multi-benchmark output, risk-adjusted comparisons
 - `[ ]` Tracking error and information ratio
 - `[ ]` Rolling-window comparisons
 
 ---
 
-# Two-Month Sequencing (May 2 → July 2)
+# Sequencing
 
-Realistic, not aspirational.
+### Phase 4a — free-data scanners (in progress)
+4 shipped night 1. 9 left. ~1-2 per session = 5-9 more sessions.
 
-### Weeks 1-3 (May 2 → May 23) — Phase 4a sprint
-- Validate insider_buying output (in progress 2026-05-02)
-- Fix breakout_52w universe truncation
-- Build scanners #3-13 at ~1-2 per session
-- Realistic: 8-10 scanners shipped, 3-5 deferred to later
+### Phase 4b/c/d/e/f — supporting infrastructure
+After 4a complete. Each is its own multi-session build.
 
-### Week 4 (May 23 → May 30) — Phase 4b/c
-Investability filter and cross-scanner meta-ranker. Without these, scanner CSVs are noise lists.
+### Phase 4g — paid-data scanners
+After 4a + subscription decisions made. Subscribe → build → ship. 4 scanners, plan for 1-2 sessions each.
 
-### Week 5 (May 30 → June 6) — Phase 4e + 4f
-Backtested signal weighting framework (4e). Phase 3 retroactive items (4f): regime params sweep, trunk re-eval if scanners are producing edge.
+### Phases 5-7 — production readiness
+Logging → alerting → deployment. Required before any real money.
 
-### Weeks 6-7 (June 6 → June 20) — Phases 5 & 6
-Persistent logging, then alerting. Both required before Phase 7.
-
-### Weeks 8-9 (June 20 → July 4) — Phase 7 prep + start observation
-Dockerfile, VM, cron, health checks. Fill-status polling (7a). VXUS/BND wind-down logic (7a). Start 30-day paper observation period when 7 ships.
-
-### What this two-month plan does NOT include
-- Phase 4d (watchlist) — defer
-- Phase 8 (hardening) — runs in parallel with paper observation
-- Phases 9-12 — post-go-live
-
-### Real-money go-live earliest plausible date
-- Phase 7 ships ~July 1
-- 30-day paper observation: July 1 → Aug 1
-- $5-10k slice: Aug 1
-- 30 days at small size: Aug 1 → Sept 1
-- Full $200k: ~Sept 1
-
-**Aggressive but plausible: late August. Realistic: September.**
+### Phases 8-12 — refinements and growth
+Run in parallel with paper observation period.
 
 ---
 
 # How to resume next session
 
 1. `cd "C:\Users\Sean Coleman\strategy_bot"`, `git pull origin main`
-2. Read this file to get caught up
-3. Check `scan_output/` for any new scanner CSVs (Drive-synced from either machine)
-4. Run `python -m pytest tests/ -q` to confirm 181 tests still passing
-5. Pick from the current phase's checklist
-6. End of session: update this file's "Last updated" timestamp + checkboxes, then commit
+2. Read this file
+3. Check `scan_output/` for any new scanner CSVs
+4. Run `python -m pytest tests/ -q` (should be 181 passing)
+5. Pick from current phase's checklist — next up is #5 fda_calendar
+6. End of session: update this file's "Last updated" + checkboxes, commit
 
 ---
 
 # Open risks / known issues
 
-- **Phase 4 ROI question.** 13 scanners feeding a 10% acorns sleeve = $20k of capital. That's a lot of pipe for a small slice. Justification depends on either (a) educational/transferable infrastructure, or (b) eventually flipping Phase 11 autonomy. If (b), 4e is hard-required.
-- **V3 underperforms SPY by 4 CAGR.** By design (defensive portfolio). But if scanner-driven branches don't add edge, the trunk allocation should be revisited (4f).
+- **V3 underperforms SPY by 4 CAGR.** By design (defensive portfolio). If scanner-driven branches don't add edge, trunk allocation should be revisited (4f).
 - **Single-period backtest.** 7.4% / -17.2% / 0.68 are 2021-2026 numbers. Different regimes will produce different numbers. Don't anchor.
 - **No tax drag in backtests.** 277 trades over 5y is real tax events. After-tax CAGR is lower than 7.4%.
 - **Quote-based ledger writes.** Paper-grade. Real money needs fill-status polling (7a).
-- **VXUS/BND still in paper account.** Auto-liquidation will sell them at next executed rebalance. Risk manager rejects single-shot in real money — need wind-down feature first (7a).
-- **breakout_52w universe truncation.** Alphabetical cap at A-HYR misses MSFT/NVDA/META. Fix early in Phase 4 sprint.
+- **VXUS/BND still in paper account.** Auto-liquidation will sell them at next executed rebalance. Need wind-down feature first (7a).
+- **Spinoff tracker false-positive parents.** Filter #3 occasionally matches the wrong parent CIK on coincidental name collisions. Acceptable for v1.
 - **Phase 11 fundamentally hard.** Most retail systematic strategies fail at the rules-encoding step. Treat with extreme skepticism.
