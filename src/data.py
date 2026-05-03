@@ -81,14 +81,34 @@ def fetch_bars(
     if not to_fetch:
         return result
 
-    log.info(f"Fetching {len(to_fetch)} symbols from Alpaca: {to_fetch}")
-    req = StockBarsRequest(
-        symbol_or_symbols=to_fetch,
-        timeframe=TimeFrame.Day,
-        start=datetime.combine(start, datetime.min.time()),
-        end=datetime.combine(end, datetime.min.time()),
-    )
-    bars = client.get_stock_bars(req)
+    # Alpaca rejects requests with 414 URI-too-long when too many symbols
+    # are passed in a single call. Chunk into batches of 100 to stay safe.
+    BATCH_SIZE = 100
+    log.info(f"Fetching {len(to_fetch)} symbols from Alpaca in batches of {BATCH_SIZE}")
+
+    bars_data = {}
+    total_batches = (len(to_fetch) + BATCH_SIZE - 1) // BATCH_SIZE
+    for batch_idx in range(0, len(to_fetch), BATCH_SIZE):
+        batch = to_fetch[batch_idx:batch_idx + BATCH_SIZE]
+        batch_num = (batch_idx // BATCH_SIZE) + 1
+        log.info(f"  Batch {batch_num}/{total_batches}: fetching {len(batch)} symbols")
+        try:
+            req = StockBarsRequest(
+                symbol_or_symbols=batch,
+                timeframe=TimeFrame.Day,
+                start=datetime.combine(start, datetime.min.time()),
+                end=datetime.combine(end, datetime.min.time()),
+            )
+            batch_bars = client.get_stock_bars(req)
+            bars_data.update(batch_bars.data)
+        except Exception as e:
+            log.warning(f"Batch {batch_num} failed: {e}; continuing with next batch")
+
+    # Wrap in an object that mimics the original .data attribute access
+    class _BarsContainer:
+        def __init__(self, data):
+            self.data = data
+    bars = _BarsContainer(bars_data)
 
     for symbol in to_fetch:
         if symbol not in bars.data:

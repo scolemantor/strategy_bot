@@ -45,8 +45,13 @@ class Breakout52wScanner(Scanner):
     MIN_VOLUME_RATIO = 1.5
     MIN_BREAKOUT_PCT = 0.005
     MIN_PRICE = 5.0
-    MAX_UNIVERSE_SIZE = 5000
-    BARS_FETCH_DAYS = 280
+    MAX_REASONABLE_BREAKOUT_PCT = 0.50  # >50% almost always = data quality issue
+    MIN_AVG_VOLUME = 10_000  # filter illiquid names where ratios are noise
+    # No truncation — scan the full Alpaca universe.
+    # Previously capped at 5000 which alphabetically truncated to A-HYR,
+    # missing MSFT, NVDA, META, TSLA and every other large-cap past H.
+    MAX_UNIVERSE_SIZE = 20000
+    BARS_FETCH_DAYS = 400
 
     def run(self, run_date: date) -> ScanResult:
         try:
@@ -127,22 +132,32 @@ class Breakout52wScanner(Scanner):
         if prior_high <= 0:
             return None
 
-        recent = df.iloc[-self.BREAKOUT_RECENCY_DAYS:]
-        recent_high = float(recent["high"].max())
-        if recent_high <= prior_high * (1 + self.MIN_BREAKOUT_PCT):
+        # Require the LAST CLOSE to be above prior high — not just an intraday wick.
+        if last_close <= prior_high * (1 + self.MIN_BREAKOUT_PCT):
+            return None
+
+        breakout_pct = (last_close - prior_high) / prior_high
+
+        # Filter implausible breakouts — almost always corrupt data
+        if breakout_pct > self.MAX_REASONABLE_BREAKOUT_PCT:
+            log.debug(f"Skipping {symbol}: breakout {breakout_pct:.1%} > sanity cap")
             return None
 
         vol_window = df["volume"].iloc[-61:-1]
         avg_volume = float(vol_window.mean()) if len(vol_window) > 0 else 0.0
-        if avg_volume <= 0:
+        # Floor avg volume — prevents huge ratios from near-zero denominators
+        if avg_volume < self.MIN_AVG_VOLUME:
             return None
         volume_ratio = last_volume / avg_volume
         if volume_ratio < self.MIN_VOLUME_RATIO:
             return None
 
-        breakout_pct = (recent_high - prior_high) / prior_high
-
-        breakout_day = recent[recent["high"] > prior_high].index[0]
+        recent = df.iloc[-self.BREAKOUT_RECENCY_DAYS:]
+        breakout_closes = recent[recent["close"] > prior_high]
+        if breakout_closes.empty:
+            breakout_day = df.index[-1]
+        else:
+            breakout_day = breakout_closes.index[0]
         breakout_day_str = (
             breakout_day.date().isoformat()
             if hasattr(breakout_day, "date") else str(breakout_day)[:10]

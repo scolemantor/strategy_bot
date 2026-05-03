@@ -322,14 +322,53 @@ class InsiderBuyingScanner(Scanner):
             save_cached_filing(accession, [])
             return []
 
-        xml_match = re.search(
-            r'href="(/Archives/edgar/data/\d+/\d+/[^"]+\.xml)"',
+        # Find ALL .xml links on the filing index page, then pick the actual Form 4.
+        # The previous version grabbed the first .xml match, which on EDGAR is
+        # almost always the index metadata XML — it has no nonDerivativeTransaction
+        # elements, so every filing parsed to 0 transactions.
+        # Strategy: prefer files whose name contains "form4" (the standard SEC
+        # naming convention), then fall back to any .xml that isn't the
+        # accession-index metadata file.
+        xml_candidates = re.findall(
+            r'href="([^"]+\.xml)"',
             resp.text,
+            flags=re.IGNORECASE,
         )
-        if not xml_match:
+
+        if not xml_candidates:
             save_cached_filing(accession, [])
             return []
-        xml_url = EDGAR_BASE + xml_match.group(1)
+
+        # Strip XSL transformation prefix (xslF345X06/) from every candidate so
+        # we always fetch raw XML, never the HTML-rendered view. Then dedupe.
+        # Without this, we'd fetch the .xml URL but get an HTML page back,
+        # which fails to parse as XML and returns 0 transactions.
+        raw_candidates = []
+        seen = set()
+        for c in xml_candidates:
+            stripped = re.sub(r'/xslF\d+X\d+/', '/', c, flags=re.IGNORECASE)
+            if stripped not in seen:
+                seen.add(stripped)
+                raw_candidates.append(stripped)
+
+        # Filter out the accession-index metadata XML (no transactions in it)
+        non_index = [c for c in raw_candidates if "-index.xml" not in c.lower()]
+        if not non_index:
+            non_index = raw_candidates
+
+        # Prefer files named like Form 4 docs (form4.xml, wf-form4.xml, etc.)
+        form4_named = [c for c in non_index if "form4" in c.lower()]
+        xml_path = form4_named[0] if form4_named else non_index[0]
+
+        # Build absolute URL: handle both absolute and relative paths
+        if xml_path.startswith("http"):
+            xml_url = xml_path
+        elif xml_path.startswith("/"):
+            xml_url = EDGAR_BASE + xml_path
+        else:
+            # Relative path — resolve against the filing index URL
+            base = filing["filing_index_url"].rsplit("/", 1)[0]
+            xml_url = base + "/" + xml_path
 
         try:
             xml_resp = edgar_get(xml_url)
