@@ -9,6 +9,7 @@ from .earnings_calendar import EarningsCalendarScanner
 from .earnings_drift import EarningsDriftScanner
 from .fda_calendar import FdaCalendarScanner
 from .insider_buying import InsiderBuyingScanner
+from .ipo_lockup import IpoLockupScanner
 from .macro_calendar import MacroCalendarScanner
 from .sector_rotation import SectorRotationScanner
 from .short_squeeze import ShortSqueezeScanner
@@ -28,6 +29,7 @@ SCANNERS: Dict[str, Type[Scanner]] = {
     "sector_rotation": SectorRotationScanner,
     "earnings_calendar": EarningsCalendarScanner,
     "macro_calendar": MacroCalendarScanner,
+    "ipo_lockup": IpoLockupScanner,
 }
 
 
