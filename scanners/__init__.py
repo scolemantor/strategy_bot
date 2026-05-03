@@ -8,6 +8,7 @@ from .breakout_52w import Breakout52wScanner
 from .earnings_drift import EarningsDriftScanner
 from .fda_calendar import FdaCalendarScanner
 from .insider_buying import InsiderBuyingScanner
+from .sector_rotation import SectorRotationScanner
 from .short_squeeze import ShortSqueezeScanner
 from .small_cap_value import SmallCapValueScanner
 from .spinoff_tracker import SpinoffTrackerScanner
@@ -22,6 +23,7 @@ SCANNERS: Dict[str, Type[Scanner]] = {
     "thirteen_f_changes": ThirteenFChangesScanner,
     "short_squeeze": ShortSqueezeScanner,
     "small_cap_value": SmallCapValueScanner,
+    "sector_rotation": SectorRotationScanner,
 }
 
 
