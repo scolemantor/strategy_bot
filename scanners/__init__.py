@@ -9,6 +9,7 @@ from .earnings_drift import EarningsDriftScanner
 from .fda_calendar import FdaCalendarScanner
 from .insider_buying import InsiderBuyingScanner
 from .spinoff_tracker import SpinoffTrackerScanner
+from .thirteen_f_changes import ThirteenFChangesScanner
 
 SCANNERS: Dict[str, Type[Scanner]] = {
     "insider_buying": InsiderBuyingScanner,
@@ -16,6 +17,7 @@ SCANNERS: Dict[str, Type[Scanner]] = {
     "earnings_drift": EarningsDriftScanner,
     "spinoff_tracker": SpinoffTrackerScanner,
     "fda_calendar": FdaCalendarScanner,
+    "thirteen_f_changes": ThirteenFChangesScanner,
 }
 
 

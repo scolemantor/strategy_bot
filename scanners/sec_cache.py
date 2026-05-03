@@ -24,6 +24,8 @@ CACHE_DIR = Path("data_cache")
 INDEX_CACHE = CACHE_DIR / "sec_daily_index"
 FILING_CACHE = CACHE_DIR / "sec_form4_parsed"
 SPINOFF_CACHE = CACHE_DIR / "sec_spinoff_parsed"
+THIRTEEN_F_CACHE = CACHE_DIR / "sec_13f_parsed"
+THIRTEEN_F_FILINGS_LIST_CACHE = CACHE_DIR / "sec_13f_filings_list"
 
 
 def _index_cache_path(day: date) -> Path:
@@ -149,3 +151,82 @@ def save_cached_spinoff(accession: str, data: Dict) -> None:
         if isinstance(v, date):
             copy[fld] = v.isoformat()
     _spinoff_cache_path(accession).write_text(json.dumps(copy))
+# --- 13F cache (scanner #6) ---
+# Two layers:
+#   1. Per-fund filings list cache (which 13Fs has this fund filed?) — TTL 24h
+#   2. Per-filing parsed holdings cache (the actual position data) — forever
+# 13F filings are immutable once filed (amendments get new accessions),
+# so parsed holdings can be cached indefinitely.
+
+def _thirteen_f_filings_list_path(cik: str) -> Path:
+    return THIRTEEN_F_FILINGS_LIST_CACHE / f"{cik}.json"
+
+
+def load_cached_13f_filings_list(cik: str, max_age_hours: float = 24) -> Optional[List[Dict]]:
+    import time as _t
+    p = _thirteen_f_filings_list_path(cik)
+    if not p.exists():
+        return None
+    age_hours = (_t.time() - p.stat().st_mtime) / 3600
+    if age_hours > max_age_hours:
+        return None
+    try:
+        rows = json.loads(p.read_text())
+        for r in rows:
+            v = r.get("filing_date")
+            if isinstance(v, str):
+                try:
+                    r["filing_date"] = date.fromisoformat(v)
+                except ValueError:
+                    r["filing_date"] = None
+            v = r.get("period_of_report")
+            if isinstance(v, str):
+                try:
+                    r["period_of_report"] = date.fromisoformat(v)
+                except ValueError:
+                    r["period_of_report"] = None
+        return rows
+    except Exception as e:
+        log.warning(f"Failed to load 13F filings list cache for CIK {cik}: {e}")
+        return None
+
+
+def save_cached_13f_filings_list(cik: str, filings: List[Dict]) -> None:
+    THIRTEEN_F_FILINGS_LIST_CACHE.mkdir(parents=True, exist_ok=True)
+    serializable = []
+    for f in filings:
+        copy = dict(f)
+        for fld in ("filing_date", "period_of_report"):
+            v = copy.get(fld)
+            if isinstance(v, date):
+                copy[fld] = v.isoformat()
+        serializable.append(copy)
+    _thirteen_f_filings_list_path(cik).write_text(json.dumps(serializable))
+
+
+def _thirteen_f_filing_path(accession: str) -> Path:
+    return THIRTEEN_F_CACHE / f"{accession}.json"
+
+
+def is_13f_filing_cached(accession: str) -> bool:
+    if not accession:
+        return False
+    return _thirteen_f_filing_path(accession).exists()
+
+
+def load_cached_13f_filing(accession: str) -> Optional[List[Dict]]:
+    p = _thirteen_f_filing_path(accession)
+    if not p.exists():
+        return None
+    try:
+        return json.loads(p.read_text())
+    except Exception as e:
+        log.warning(f"Failed to load 13F filing cache for {accession}: {e}")
+        return None
+
+
+def save_cached_13f_filing(accession: str, holdings: List[Dict]) -> None:
+    if not accession:
+        return
+    THIRTEEN_F_CACHE.mkdir(parents=True, exist_ok=True)
+    _thirteen_f_filing_path(accession).write_text(json.dumps(holdings))
