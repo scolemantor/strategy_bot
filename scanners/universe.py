@@ -148,3 +148,92 @@ def get_sp500_universe(force_refresh: bool = False) -> List[str]:
     cache.write_text(json.dumps(tickers))
     log.info(f"S&P 500 universe: {len(tickers)} tickers (cached for {SP500_CACHE_TTL_HOURS}h)")
     return tickers
+SP1500_CACHE_TTL_HOURS = 168  # weekly, same as S&P 500
+
+
+def _sp1500_cache_path() -> Path:
+    return CACHE_DIR / "sp1500_universe.json"
+
+
+def _is_sp1500_cache_fresh() -> bool:
+    p = _sp1500_cache_path()
+    if not p.exists():
+        return False
+    age_hours = (time.time() - p.stat().st_mtime) / 3600
+    return age_hours < SP1500_CACHE_TTL_HOURS
+
+
+def get_sp1500_universe(force_refresh: bool = False) -> List[str]:
+    """Return current S&P 1500 constituent tickers (S&P 500 + S&P 400 MidCap + S&P 600 SmallCap).
+
+    Used by scanners that want broad US equity coverage without the noise of
+    OTC / warrants / units / leveraged products in the full Alpaca universe.
+
+    Source: Wikipedia. We pull all three constituent lists and dedupe.
+    Cached weekly.
+    """
+    import pandas as pd
+    import requests as _requests
+    from io import StringIO
+
+    cache = _sp1500_cache_path()
+    if not force_refresh and _is_sp1500_cache_fresh():
+        log.debug("Using cached S&P 1500 universe")
+        return json.loads(cache.read_text())
+
+    log.info("Fetching S&P 1500 constituents from Wikipedia (3 indices)")
+
+    sources = {
+        "S&P 500":     "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies",
+        "S&P 400":     "https://en.wikipedia.org/wiki/List_of_S%26P_400_companies",
+        "S&P 600":     "https://en.wikipedia.org/wiki/List_of_S%26P_600_companies",
+    }
+
+    all_tickers: set = set()
+
+    for name, url in sources.items():
+        try:
+            resp = _requests.get(
+                url,
+                headers={
+                    "User-Agent": "strategy_bot/1.0 (+https://github.com/scolemantor/strategy_bot)"
+                },
+                timeout=30,
+            )
+            resp.raise_for_status()
+            tables = pd.read_html(StringIO(resp.text))
+        except Exception as e:
+            log.warning(f"  Failed to fetch {name}: {e}")
+            continue
+
+        # First table is the constituents list for all three index pages
+        df = tables[0]
+        symbol_col = None
+        for c in df.columns:
+            if str(c).lower() == "symbol":
+                symbol_col = c
+                break
+        if symbol_col is None:
+            log.warning(f"  No Symbol column in {name}; columns: {list(df.columns)}")
+            continue
+
+        tickers = df[symbol_col].astype(str).tolist()
+        # Wikipedia uses BRK.B; yfinance/Alpaca use BRK-B. Normalize.
+        tickers = [t.replace(".", "-").strip().upper() for t in tickers]
+        tickers = [t for t in tickers if t and not t.startswith("NAN")]
+
+        log.info(f"  {name}: {len(tickers)} tickers")
+        all_tickers.update(tickers)
+
+    if not all_tickers:
+        # Fallback to stale cache if exists
+        if cache.exists():
+            log.warning("All Wikipedia fetches failed; using stale cache")
+            return json.loads(cache.read_text())
+        raise RuntimeError("Could not fetch S&P 1500 universe and no cache available")
+
+    sorted_tickers = sorted(all_tickers)
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    cache.write_text(json.dumps(sorted_tickers))
+    log.info(f"S&P 1500 universe: {len(sorted_tickers)} tickers (cached for {SP1500_CACHE_TTL_HOURS}h)")
+    return sorted_tickers

@@ -9,6 +9,7 @@ from .earnings_drift import EarningsDriftScanner
 from .fda_calendar import FdaCalendarScanner
 from .insider_buying import InsiderBuyingScanner
 from .short_squeeze import ShortSqueezeScanner
+from .small_cap_value import SmallCapValueScanner
 from .spinoff_tracker import SpinoffTrackerScanner
 from .thirteen_f_changes import ThirteenFChangesScanner
 
@@ -20,6 +21,7 @@ SCANNERS: Dict[str, Type[Scanner]] = {
     "fda_calendar": FdaCalendarScanner,
     "thirteen_f_changes": ThirteenFChangesScanner,
     "short_squeeze": ShortSqueezeScanner,
+    "small_cap_value": SmallCapValueScanner,
 }
 
 
