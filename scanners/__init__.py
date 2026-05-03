@@ -5,6 +5,7 @@ from typing import Dict, Type
 
 from .base import Scanner
 from .breakout_52w import Breakout52wScanner
+from .earnings_calendar import EarningsCalendarScanner
 from .earnings_drift import EarningsDriftScanner
 from .fda_calendar import FdaCalendarScanner
 from .insider_buying import InsiderBuyingScanner
@@ -24,6 +25,7 @@ SCANNERS: Dict[str, Type[Scanner]] = {
     "short_squeeze": ShortSqueezeScanner,
     "small_cap_value": SmallCapValueScanner,
     "sector_rotation": SectorRotationScanner,
+    "earnings_calendar": EarningsCalendarScanner,
 }
 
 
