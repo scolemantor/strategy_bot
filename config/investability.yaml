@@ -1,0 +1,71 @@
+# Investability filter configuration.
+#
+# Per-scanner tier assignment + optional overrides.
+#
+# Tiers:
+#   strict     — $300M mcap, $5M ADV, listed only, all checks on
+#   loose      — $50M mcap, $1M ADV, listed only, all checks on (DEFAULT)
+#   permissive — $10M mcap, $250K ADV, allow OTC, exclusions only
+#   off        — bypass entirely (calendar/macro scanners)
+#
+# Any field present at the scanner level overrides the tier preset.
+
+scanners:
+
+  # SEC Form 4 cluster buys — small-mid cap range typical, loose default works
+  insider_buying:
+    tier: loose
+
+  # 52-week breakouts — usually mid-large cap, loose floor fine
+  breakout_52w:
+    tier: loose
+
+  # Post-earnings drift — S&P 500 universe so already large-cap; loose
+  earnings_drift:
+    tier: loose
+
+  # Spinoffs — newly-formed entities can be small; permissive
+  spinoff_tracker:
+    tier: permissive
+
+  # FDA biotech — small biotech is the point; permissive but exclusions on
+  fda_calendar:
+    tier: permissive
+
+  # 13F changes — already filtered to large smart-money positions; loose
+  thirteen_f_changes:
+    tier: loose
+
+  # Short squeeze — acorns sleeve, momentum-driven; loose with allow_otc=False
+  short_squeeze:
+    tier: loose
+
+  # Small-cap value — INTERNALLY filters mcap; we still want exclusions + exchange
+  # Override mcap floor to 0 since scanner already caps at $300M-$3B
+  small_cap_value:
+    tier: loose
+    min_market_cap: 0  # scanner handles this internally
+
+  # Sector rotation — operates on ETFs not equities; bypass
+  sector_rotation:
+    tier: "off"
+    bypass: true
+
+  # Earnings calendar — large universe, want filter to drop garbage; loose
+  earnings_calendar:
+    tier: loose
+
+  # Macro calendar — events not equities; bypass
+  macro_calendar:
+    tier: "off"
+    bypass: true
+
+  # IPO lockup — recent IPOs, may have low ADV initially; permissive
+  # but no OTC (real lockup setups are listed exchange)
+  ipo_lockup:
+    tier: permissive
+    allow_otc: false
+
+  # Insider selling clusters — same universe as #1; loose
+  insider_selling_clusters:
+    tier: loose

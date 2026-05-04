@@ -1,0 +1,21 @@
+# Hard-exclusions list. Tickers here will NEVER pass investability filter,
+# regardless of which scanner surfaced them or their fundamentals.
+#
+# Use cases:
+#   - Tickers under SEC investigation
+#   - Companies with known fraud / accounting concerns
+#   - Tickers personally avoided for any reason (ethical, religious, etc)
+#   - Reverse-merger shells you've manually identified
+#   - Crypto-adjacent shell companies not really operating
+#
+# Format: list of ticker symbols (uppercase, no quotes around symbols).
+# Comments allowed inline.
+
+exclusions:
+  # Add your tickers here, one per line:
+  # - XYZ   # reason for exclusion
+  # - ABC
+
+  # Example structure (commented out):
+  # - WISH   # historical fraud allegations
+  # - GME    # personal preference, no exposure to meme dynamics
