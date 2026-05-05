@@ -2,7 +2,7 @@
 
 > Living document. Update at the end of every working session.
 
-**Last updated:** 2026-05-04 (early morning, post-Phase-4b-complete)
+**Last updated:** 2026-05-04 (evening, post-Phase-4c-complete)
 **Repo:** github.com/scolemantor/strategy_bot
 **Account:** Alpaca paper, $200k notional, seeded 2026-05-01 11:57am ET
 
@@ -13,6 +13,7 @@
 - **Phases 1, 2, 3:** DONE. Phase 3 merged 2026-05-02.
 - **Phase 4a:** COMPLETE. 13 of 13 free-data scanners shipped 2026-05-03.
 - **Phase 4b:** COMPLETE. Investability filter all 7 gates working 2026-05-04.
+- **Phase 4c:** COMPLETE. Cross-scanner meta-ranker shipped 2026-05-04.
 - **Phase 4g:** 4 paid-data scanners (#14-17) deferred pending subscription decisions.
 - **Phases 5-12:** not started.
 - **181 tests passing.**
@@ -103,14 +104,18 @@ Universal quality gate every scanner result passes through. Lives in `scanners/i
 
 Validated 2026-05-04 sweep across all 13 scanners: filter cascade does real work everywhere. Going-concern detection caught WLACW SPAC warrant (substantial doubt + mcap unavailable + ADV $0.61M). 3 bugs fixed mid-build (YAML 'off' coercion to False, _load_exclusions None handling, yfinance fundamentals universe coverage gap).
 
-### 4c — Cross-scanner meta-ranker (NOT STARTED)
+### 4c — Cross-scanner meta-ranker (DONE 2026-05-04)
 
-- `[ ]` Aggregator (load all 13 scanner CSVs, build master DataFrame keyed on ticker)
-- `[ ]` Signal vector per ticker (boolean flags + per-scanner score)
-- `[ ]` Composite scoring (weighted sum + multi-signal bonus + category diversity)
-- `[ ]` `scan_output/<date>/master_ranked.csv` output
-- `[ ]` Configurable signal weights (`config/scanner_weights.yaml`)
-- `[ ]` Conflict detection (e.g. scanner #1 buy + scanner #13 sell on same ticker)
+Lives in `scanners/meta_ranker.py`. Per-scanner config in `config/scanner_weights.yaml`. CLI: `python -m scanners.meta_ranker --date YYYY-MM-DD`.
+- `[x]` Aggregator (loads all 13 scanner CSVs from a date dir, builds master DataFrame)
+- `[x]` Signal vector per ticker (per-scanner score + direction + category)
+- `[x]` Composite scoring (normalized score * weight * multi-scanner bonus * category diversity bonus)
+- `[x]` `scan_output/<date>/master_ranked.csv` output
+- `[x]` Configurable signal weights (`config/scanner_weights.yaml`)
+- `[x]` Conflict detection (`conflicts.csv` for tickers hit by both bullish AND bearish scanners — bullish_sum - bearish_sum + neutral_sum)
+- `[x]` Per-scanner contribution audit (`category_summary.csv`)
+
+Three v2 fixes applied: (1) p90 score normalization so multi-scanner overlap dominates raw magnitude; (2) same-scanner duplicate dedupe via groupby+sum; (3) earnings_calendar dropped when single-scanner. Validated 2026-05-03: 608 raw -> 265 post-filter unique tickers in master, top results show real cross-validation (NOW/HPE/VRT/GNRC = earnings_drift+thirteen_f_changes; MTZ = breakout_52w+thirteen_f_changes), conflicts correctly surface CRWV at -1.48 net.
 
 ### 4d — Watchlist tracker
 
@@ -138,7 +143,7 @@ Identified during Phase 3 work, need to land before Phase 5.
 
 These four scanners require paid data feeds. **All four ship.** The build sequence: subscribe to feed → write client wrapper → write scanner → validate → register. Same pattern as #1-13.
 
-Subscription decisions to be made with 4a complete and clear view of which signals matter most.
+Subscription decisions to be made with 4a-f complete and clear view of which signals matter most.
 
 - `[ ]` **#14 options_unusual** — Unusual Whales / FlowAlgo / OptionStrat
   - Signal: calls bought above ask >5x average daily volume
@@ -254,11 +259,14 @@ Highest-risk feature. Build Phase 4 manual workflow first, run for 6+ months, en
 ### Phase 4b — DONE
 Investability filter (all 7 gates) shipped 2026-05-04. Universal quality gate now active on all scanner outputs.
 
-### Phase 4c/d/e/f — supporting infrastructure
-Now unblocked. Each is its own multi-session build. Locked sequence: 4c (meta-ranker) → 4d (watchlist) → 4e (backtest weighting) → 4f (Phase 3 retroactive).
+### Phase 4c — DONE
+Cross-scanner meta-ranker shipped 2026-05-04. Daily morning output is now `scan_output/<date>/master_ranked.csv` with cross-scanner conviction scoring + `conflicts.csv` flagging bullish-bearish overlaps.
+
+### Phase 4d/e/f — supporting infrastructure
+Now unblocked. Each is its own multi-session build. Locked sequence: 4d (watchlist) → 4e (backtest weighting) → 4f (Phase 3 retroactive).
 
 ### Phase 4g — paid-data scanners
-After 4c-f complete and subscription decisions made. 4 scanners, plan for 1-2 sessions each.
+After 4d-f complete and subscription decisions made. 4 scanners, plan for 1-2 sessions each.
 
 ### Phases 5-7 — production readiness
 Logging → alerting → deployment. Required before any real money.
@@ -274,7 +282,7 @@ Run in parallel with paper observation period.
 2. Read this file
 3. Check `scan_output/` for any new scanner CSVs
 4. Run `python -m pytest tests/ -q` (should be 181 passing)
-5. Pick from current phase's checklist — 4a + 4b complete, ready for 4c (cross-scanner meta-ranker)
+5. Pick from current phase's checklist — 4a/4b/4c complete, ready for 4d (watchlist tracker)
 6. End of session: update this file's "Last updated" + checkboxes, commit
 
 ---
@@ -293,5 +301,6 @@ Run in parallel with paper observation period.
 - **Insider selling can't filter 10b5-1 plans.** Parsed Form 4 data doesn't extract the plan flag. Cluster requirement (2+ insiders) + $1M aggregate filter most routine sales.
 - **Investability filter shares-outstanding regex is approximate.** Extracts from 10-K/10-Q cover-page text via regex; may miss some filings with non-standard formatting. Dilution detection works for the common cases; misses are silent (returns None, doesn't reject).
 - **Going-concern detection is text-pattern based.** Catches the standard SEC-required language but a creative auditor could phrase it differently. False negatives are possible; false positives unlikely (the specific phrases are rare in non-going-concern contexts).
+- **Meta-ranker scanner_weights.yaml requires periodic recalibration.** Weights are currently judgment-based (smart-money scanners 1.2-1.3, technical 1.0, speculative 0.7). Phase 4e will replace with backtest-derived weights. Until then, the rankings are directionally right but not optimally tuned.
 - **Phase 11 fundamentally hard.** Most retail systematic strategies fail at the rules-encoding step. Treat with extreme skepticism.
 - **AI assistant order-of-build tendency.** Sean noted 2026-05-03: assistant has a habit of wanting to skip to interesting infrastructure work (4c meta-ranker, 4b filters, etc) before completing the locked sequential build. Sean's correction: WE DO NOT STOP. WE FINISH WHAT WE STARTED IN ORDER UNTIL IT IS COMPLETE AND THEN WE MOVE ON. Sequence is non-negotiable: 4a → 4b → 4c → 4d → 4e → 4f → 4g → Phase 5 → onward. Assistant should not propose reordering without explicit Sean approval. This applies to scanner builds, infrastructure work, and any future phase decisions.
