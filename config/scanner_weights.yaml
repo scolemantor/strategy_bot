@@ -1,0 +1,84 @@
+# Cross-scanner meta-ranker configuration.
+#
+# Each scanner has:
+#   - direction: bullish / bearish / neutral
+#   - category: signal type (conviction / technical / event / value)
+#   - weight: multiplier on the scanner's raw score (default 1.0)
+#
+# The meta-ranker uses direction to detect conflicts (e.g. ticker hits both
+# insider_buying [bullish] and insider_selling_clusters [bearish] = noteworthy).
+# Category is used for diversity bonus — a ticker hitting 3 different
+# categories is stronger than 3 scanners of the same category.
+
+# Multi-scanner bonus: applied when a ticker shows up in N scanners
+# (after deduplicating bullish/bearish — a ticker hitting both #1 and #13
+# is a conflict, not a confirmation).
+multi_scanner_bonus:
+  1: 1.0   # no bonus, single scanner
+  2: 1.5   # 50% bonus for 2 scanners agreeing
+  3: 2.0   # 100% bonus for 3
+  4: 2.5   # 150% bonus for 4
+  5: 3.0   # cap at 3.0x for 5+
+
+# Category diversity bonus: when scanners hitting a ticker span multiple
+# categories (e.g. one technical + one conviction + one value), that's
+# stronger than multiple scanners in the same category.
+category_diversity_bonus:
+  1: 1.0   # all from same category
+  2: 1.2   # 2 categories
+  3: 1.4   # 3 categories
+  4: 1.5   # 4+ categories
+
+scanners:
+  insider_buying:
+    direction: bullish
+    category: conviction
+    weight: 1.2  # smart-money insider conviction is high-value signal
+  breakout_52w:
+    direction: bullish
+    category: technical
+    weight: 1.0
+  earnings_drift:
+    direction: bullish
+    category: technical
+    weight: 1.0
+  spinoff_tracker:
+    direction: bullish
+    category: conviction
+    weight: 1.0
+  fda_calendar:
+    direction: neutral  # binary catalyst — could go either way
+    category: event
+    weight: 0.8
+  thirteen_f_changes:
+    direction: bullish
+    category: conviction
+    weight: 1.3  # smart-money fund conviction is highest-value signal
+  short_squeeze:
+    direction: bullish  # squeeze setup is bullish but acorns-sleeve only
+    category: technical
+    weight: 0.7  # downweight — speculation, not investment
+  small_cap_value:
+    direction: bullish
+    category: value
+    weight: 1.1
+  sector_rotation:
+    direction: neutral  # ETF signal, not individual ticker
+    category: technical
+    weight: 0.5  # ETFs aren't individual investability targets
+  earnings_calendar:
+    direction: neutral  # event awareness, not directional
+    category: event
+    weight: 0.6
+  macro_calendar:
+    direction: neutral  # event awareness, not ticker-level
+    category: event
+    weight: 0.0  # excluded from per-ticker ranking
+  ipo_lockup:
+    direction: bearish  # supply pressure thesis (or contrarian bottom-fish)
+    category: event
+    weight: 0.8
+  insider_selling_clusters:
+    direction: bearish
+    category: conviction
+    weight: 1.2  # mirror of #1's weight
