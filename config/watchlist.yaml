@@ -1,0 +1,24 @@
+# Watchlist tracker (Phase 4d).
+# Edit via CLI: python scan.py watch add/remove/list TICKER
+
+settings:
+  stale_days: 14
+  delta_threshold_pct: 0.1
+
+tickers:
+  BLLN:
+    added_date: "2026-05-04"
+    reason: "lockup expires 2026-05-05, watch for 5-10pct pullback"
+    category: "general"
+  CRWV:
+    added_date: "2026-05-04"
+    reason: "post-IPO insider dump tracking, bottom-fish target eventual"
+    category: "general"
+  HPE:
+    added_date: "2026-05-04"
+    reason: "post-earnings momentum + fund accumulation"
+    category: "general"
+  NOW:
+    added_date: "2026-05-04"
+    reason: "earnings_drift + thirteen_f_changes overlap"
+    category: "general"
