@@ -2,7 +2,7 @@
 
 > Living document. Update at the end of every working session.
 
-**Last updated:** 2026-05-04 (evening, post-Phase-4c-complete)
+**Last updated:** 2026-05-04 (late evening, post-Phase-4d-complete)
 **Repo:** github.com/scolemantor/strategy_bot
 **Account:** Alpaca paper, $200k notional, seeded 2026-05-01 11:57am ET
 
@@ -14,6 +14,7 @@
 - **Phase 4a:** COMPLETE. 13 of 13 free-data scanners shipped 2026-05-03.
 - **Phase 4b:** COMPLETE. Investability filter all 7 gates working 2026-05-04.
 - **Phase 4c:** COMPLETE. Cross-scanner meta-ranker shipped 2026-05-04.
+- **Phase 4d:** COMPLETE. Watchlist tracker shipped 2026-05-04.
 - **Phase 4g:** 4 paid-data scanners (#14-17) deferred pending subscription decisions.
 - **Phases 5-12:** not started.
 - **181 tests passing.**
@@ -34,6 +35,12 @@
 - Defensive tagging: BIL and GLD held flat during regime-off (only equity scales)
 - Auto-liquidation of held positions outside YAML allocation
 - Tax-aware lot ledger (HIFO + long-term preference + losses-first) live and seeded against paper account
+
+**Daily scanner workflow:**
+- `python scan.py all` — run all 13 scanners with investability filter
+- `python -m scanners.meta_ranker --date YYYY-MM-DD` — cross-validation ranking
+- `python scan.py watch digest --date YYYY-MM-DD` — personal watchlist deltas
+- Three glanceable outputs: `master_ranked.csv`, `conflicts.csv`, `watchlist_digest.csv`
 
 **Paper account positions (as of 2026-05-01):** Still holds VXUS and BND from V1 seeding. Auto-liquidation will sell them at next executed rebalance window. Risk manager will reject single-shot liquidation in real money since each is ~5% of portfolio — wind-down logic needed before live (see Phase 7a).
 
@@ -117,13 +124,16 @@ Lives in `scanners/meta_ranker.py`. Per-scanner config in `config/scanner_weight
 
 Three v2 fixes applied: (1) p90 score normalization so multi-scanner overlap dominates raw magnitude; (2) same-scanner duplicate dedupe via groupby+sum; (3) earnings_calendar dropped when single-scanner. Validated 2026-05-03: 608 raw -> 265 post-filter unique tickers in master, top results show real cross-validation (NOW/HPE/VRT/GNRC = earnings_drift+thirteen_f_changes; MTZ = breakout_52w+thirteen_f_changes), conflicts correctly surface CRWV at -1.48 net.
 
-### 4d — Watchlist tracker
+### 4d — Watchlist tracker (DONE 2026-05-04)
 
-- `[ ]` Watchlist storage (`config/watchlist.yaml`)
-- `[ ]` CLI: `python scan.py watch add/remove/list TICKER`
-- `[ ]` Daily watchlist run with delta detection
-- `[ ]` Watchlist-only digest separate from main scan results
-- `[ ]` Auto-removal rules (filter failures, N days of silence)
+Lives in `scanners/watchlist.py`. Storage in `config/watchlist.yaml`. CLI: `python scan.py watch add/remove/list/digest`.
+- `[x]` Watchlist storage (`config/watchlist.yaml` with per-ticker added_date/reason/category)
+- `[x]` CLI: `python scan.py watch add/remove/list TICKER`
+- `[x]` Daily watchlist run with delta detection (NEW / DROPPED / STRONGER / WEAKER / SAME flags)
+- `[x]` Watchlist-only digest separate from main scan results (`watchlist_digest.csv`)
+- `[x]` Auto-removal rules — implemented as STALE flag (no scanner hits in 14+ days) rather than silent auto-remove, preserves long-term theses with sparse signal
+
+Validated 2026-05-04 against 2026-05-03 scanner output: 4 test tickers (BLLN, CRWV, HPE, NOW), 7 digest rows produced, all delta types working. CRWV correctly shows BOTH thirteen_f_changes (ARK +311% accumulation $137.8M) AND insider_selling_clusters ($2.9B dump) — surfacing WHICH fund is on the other side of the conflict. HPE earnings_drift flagged STRONGER (rising score = momentum building).
 
 ### 4e — Backtested signal weighting (REQUIRED for Phase 11 autonomy)
 
@@ -262,11 +272,14 @@ Investability filter (all 7 gates) shipped 2026-05-04. Universal quality gate no
 ### Phase 4c — DONE
 Cross-scanner meta-ranker shipped 2026-05-04. Daily morning output is now `scan_output/<date>/master_ranked.csv` with cross-scanner conviction scoring + `conflicts.csv` flagging bullish-bearish overlaps.
 
-### Phase 4d/e/f — supporting infrastructure
-Now unblocked. Each is its own multi-session build. Locked sequence: 4d (watchlist) → 4e (backtest weighting) → 4f (Phase 3 retroactive).
+### Phase 4d — DONE
+Watchlist tracker shipped 2026-05-04. Daily workflow now: scan.py all -> meta_ranker -> watch digest. Three glanceable outputs per day: master_ranked.csv (cross-scanner), conflicts.csv (bullish+bearish), watchlist_digest.csv (personal tracking with deltas).
+
+### Phase 4e/f — supporting infrastructure
+Now unblocked. Locked sequence: 4e (backtested signal weighting — REQUIRED for Phase 11 autonomy) → 4f (Phase 3 retroactive items).
 
 ### Phase 4g — paid-data scanners
-After 4d-f complete and subscription decisions made. 4 scanners, plan for 1-2 sessions each.
+After 4e-f complete and subscription decisions made. 4 scanners, plan for 1-2 sessions each.
 
 ### Phases 5-7 — production readiness
 Logging → alerting → deployment. Required before any real money.
@@ -282,7 +295,7 @@ Run in parallel with paper observation period.
 2. Read this file
 3. Check `scan_output/` for any new scanner CSVs
 4. Run `python -m pytest tests/ -q` (should be 181 passing)
-5. Pick from current phase's checklist — 4a/4b/4c complete, ready for 4d (watchlist tracker)
+5. Pick from current phase's checklist — 4a/4b/4c/4d complete, ready for 4e (backtested signal weighting)
 6. End of session: update this file's "Last updated" + checkboxes, commit
 
 ---
@@ -302,5 +315,6 @@ Run in parallel with paper observation period.
 - **Investability filter shares-outstanding regex is approximate.** Extracts from 10-K/10-Q cover-page text via regex; may miss some filings with non-standard formatting. Dilution detection works for the common cases; misses are silent (returns None, doesn't reject).
 - **Going-concern detection is text-pattern based.** Catches the standard SEC-required language but a creative auditor could phrase it differently. False negatives are possible; false positives unlikely (the specific phrases are rare in non-going-concern contexts).
 - **Meta-ranker scanner_weights.yaml requires periodic recalibration.** Weights are currently judgment-based (smart-money scanners 1.2-1.3, technical 1.0, speculative 0.7). Phase 4e will replace with backtest-derived weights. Until then, the rankings are directionally right but not optimally tuned.
+- **Watchlist digest only walks back 19 days for STALE detection.** Tickers added more than 19 days ago that have NEVER appeared in any scanner will simply show STALE without an actual last_seen date. Acceptable for v1 — long-term staleness is the point of the flag anyway.
 - **Phase 11 fundamentally hard.** Most retail systematic strategies fail at the rules-encoding step. Treat with extreme skepticism.
 - **AI assistant order-of-build tendency.** Sean noted 2026-05-03: assistant has a habit of wanting to skip to interesting infrastructure work (4c meta-ranker, 4b filters, etc) before completing the locked sequential build. Sean's correction: WE DO NOT STOP. WE FINISH WHAT WE STARTED IN ORDER UNTIL IT IS COMPLETE AND THEN WE MOVE ON. Sequence is non-negotiable: 4a → 4b → 4c → 4d → 4e → 4f → 4g → Phase 5 → onward. Assistant should not propose reordering without explicit Sean approval. This applies to scanner builds, infrastructure work, and any future phase decisions.
