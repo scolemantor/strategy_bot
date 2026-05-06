@@ -11,7 +11,7 @@
 ## TL;DR
 
 - **Phases 1, 2, 3:** DONE.
-- **Phase 4a:** COMPLETE. 13 of 13 free-data scanners shipped 2026-05-03.
+- **Phase 4a:** COMPLETE for 13 of 14 free-data scanners (shipped 2026-05-03). Scanner #18 (congressional_trades) added retroactively 2026-05-06, to build after Phase 4e finishes.
 - **Phase 4b:** COMPLETE. Investability filter all 7 gates working 2026-05-04.
 - **Phase 4c:** COMPLETE. Cross-scanner meta-ranker shipped 2026-05-04.
 - **Phase 4d:** COMPLETE. Watchlist tracker shipped 2026-05-04.
@@ -86,9 +86,19 @@ Vol-weighted branches, regime detection, defensive tagging, V3 retune, tax-aware
 
 **Full 17-scanner build is locked. No scanner is being skipped.**
 
-### 4a — Free-data scanners (13 of 13 SHIPPED 2026-05-03)
+### 4a — Free-data scanners (13 of 14 SHIPPED 2026-05-03; #18 retroactively added)
 
-All 13 scanners shipped: insider_buying, breakout_52w, earnings_drift, spinoff_tracker, fda_calendar, thirteen_f_changes, short_squeeze, small_cap_value, sector_rotation, earnings_calendar, macro_calendar, ipo_lockup, insider_selling_clusters.
+13 scanners shipped 2026-05-03: insider_buying, breakout_52w, earnings_drift, spinoff_tracker, fda_calendar, thirteen_f_changes, short_squeeze, small_cap_value, sector_rotation, earnings_calendar, macro_calendar, ipo_lockup, insider_selling_clusters.
+
+**Scanner #18 — congressional_trades (retroactive add, build after 4e):**
+- Category: conviction
+- Direction: bullish (mostly — buys outnumber sells; cluster sells flagged separately)
+- Weight: 1.1 (between insider_buying 1.2 and thirteen_f_changes 1.3)
+- Data source: housestockwatcher.com + senatestockwatcher.com community APIs (parses official STOCK Act PTR PDFs)
+- Logic: flag tickers bought by 2+ members within 30-day window, OR by high-signal individual members (track list configurable in YAML) above $50k transaction size
+- Backtest mode: yes — disclosures are date-stamped and immutable; filing dates lag transactions by up to 45 days but the lag is consistent so look-ahead protection is straightforward (use disclosure_date <= as_of_date, not transaction_date)
+- Known issues: 45-day disclosure lag means signal is stale by definition; some members file late or amend after deadlines; spouse/family member trades disclosed but harder to attribute; PDF parsing edge cases occasionally produce malformed entries in community feeds
+- Why it was missed initially: oversight when the original 17-scanner spec was drafted. Free data, documented edge (Ziobrowski 2011 + follow-on academic work), fits existing conviction-category architecture cleanly. Should have been #14 from day 1.
 
 ### 4b — Investability filter (DONE 2026-05-04)
 
@@ -366,10 +376,11 @@ Build refresh cadence, beta review, internal/external tester management.
 - **Insider selling can't filter 10b5-1 plans.** Cluster + $1M filter most routine sales.
 - **Investability filter shares-outstanding regex is approximate.**
 - **Going-concern detection is text-pattern based.**
-- **Meta-ranker scanner_weights.yaml is judgment-based.** Phase 4e replaces with backtest-derived.
+- **Meta-ranker scanner_weights.yaml is judgment-based.** Phase 4e replaces with backtest-derived. New scanner #18 (congressional_trades) starts with judgment weight 1.1 until Phase 4e re-runs include it.
 - **Watchlist STALE detection only walks back 19 days.** Acceptable for v1.
 - **Phase 4e small_cap_value not backtestable.** No historical fundamentals available without paid data.
 - **Phase 4e short_squeeze uses current yfinance float for historical short% calc.** Minor look-ahead bias.
 - **Phase 11 fundamentally hard.** Most retail systematic strategies fail at the rules-encoding step.
 - **iOS app phases 13-15 add 12-18 months.** Don't underestimate. SwiftUI learning curve, App Store Connect setup, push notifications, all add up. Hire help if timeline matters more than learning.
 - **AI assistant order-of-build tendency.** Sean noted 2026-05-03: assistant has a habit of wanting to skip to interesting infrastructure work before completing the locked sequential build. Sean's correction: WE DO NOT STOP. WE FINISH WHAT WE STARTED IN ORDER UNTIL IT IS COMPLETE AND THEN WE MOVE ON. Sequence is non-negotiable: 4a → 4b → 4c → 4d → 4e → 4f → 4g → 5 → 6 → 7 → 7.5 → 8-12 → 13 → 14 → 15. Assistant should not propose reordering without explicit Sean approval.
+- **Assistant scanner-spec completeness failure 2026-05-06.** Original 17-scanner spec missed congressional_trades despite it being free data with documented academic edge. Added retroactively as scanner #18. Lesson: when defining future scanner sets, explicitly check public smart-money signal sources before locking the spec.
