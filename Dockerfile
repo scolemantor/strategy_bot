@@ -8,14 +8,23 @@ ENV PYTHONUNBUFFERED=1 \
 
 # System deps: build-essential for any wheel that needs compilation,
 # cron for the in-container scheduler, curl for the HEALTHCHECK probe,
-# ca-certificates for HTTPS, tini for proper PID 1 signal forwarding.
+# ca-certificates for HTTPS, tini for proper PID 1 signal forwarding,
+# tzdata so /etc/localtime can resolve to a real zoneinfo file.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     cron \
     curl \
     ca-certificates \
     tini \
+    tzdata \
     && rm -rf /var/lib/apt/lists/*
+
+# System timezone: cron daemon reads /etc/localtime directly to decide when
+# to fire jobs (the TZ env var alone is not enough). Without this, jobs ran
+# at UTC even though the crontab declares TZ=America/New_York.
+ENV TZ=America/New_York
+RUN ln -snf /usr/share/zoneinfo/America/New_York /etc/localtime && \
+    echo America/New_York > /etc/timezone
 
 # Non-root user for runtime.
 RUN groupadd --gid 1000 bot && \

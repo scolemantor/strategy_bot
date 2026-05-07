@@ -4,7 +4,7 @@ jobs:
   - name: scan_all
     schedule: "30 6 * * 1-5"  # 6:30 AM Mon-Fri
     command: "python scan.py all"
-    timeout_minutes: 90
+    timeout_minutes: 180   # was 90; cold-cache cycles need ~70m for insider_buying alone
     description: "Run all 13 scanners on weekdays before market open"
 
   - name: meta_ranker
