@@ -29,11 +29,11 @@ python -m src.deploy.cron_generator --output /tmp/crontab_jobs.txt
 # Install for root (cron daemon runs as root; jobs su to bot).
 crontab /tmp/crontab.txt
 echo "[entrypoint] Installed crontab:"
-crontab -l | sed 's/^/  /'
+crontab -l | sed -E 's/^([A-Z_]+=).*/\1***REDACTED***/' | sed 's/^/  /'
 
 # Start Debian cron daemon in the background.
 cron
-echo "[entrypoint] cron daemon started (pid $(pgrep -x cron | head -1))"
+echo "[entrypoint] cron daemon started"
 
 # Replace the entrypoint process with uvicorn (running as bot).
 # `exec` is critical here: it makes uvicorn the child of tini (PID 1),
