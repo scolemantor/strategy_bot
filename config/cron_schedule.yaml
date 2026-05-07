@@ -2,22 +2,22 @@ timezone: America/New_York
 
 jobs:
   - name: scan_all
-    schedule: "30 6 * * 1-5"  # 6:30 AM Mon-Fri
+    schedule: "0 23 * * 0-4"  # 11:00 PM Sun-Thu nights; output ready for next morning
     command: "python scan.py all"
     timeout_minutes: 180   # was 90; cold-cache cycles need ~70m for insider_buying alone
-    description: "Run all 13 scanners on weekdays before market open"
+    description: "Run all 13 scanners weekday evenings; output ready for next morning"
 
   - name: meta_ranker
-    schedule: "0 9 * * 1-5"  # 9:00 AM Mon-Fri (after scan_all, 2.5h budget)
-    command: "python -m scanners.meta_ranker --date $(date +%F)"
+    schedule: "30 2 * * 1-5"  # 2:30 AM Mon-Fri (3.5h after scan_all start)
+    command: "python -m scanners.meta_ranker --date $(date -d 'yesterday' +%F)"
     timeout_minutes: 5
-    description: "Aggregate scanner output into master_ranked.csv"
+    description: "Aggregate previous-night scan output into master_ranked.csv"
 
   - name: watchlist_digest
-    schedule: "5 9 * * 1-5"  # 9:05 AM Mon-Fri (5 min after meta_ranker)
-    command: "python scan.py watch digest --date $(date +%F)"
+    schedule: "35 2 * * 1-5"  # 2:35 AM Mon-Fri (5 min after meta_ranker)
+    command: "python scan.py watch digest --date $(date -d 'yesterday' +%F)"
     timeout_minutes: 5
-    description: "Generate watchlist deltas, fire alerts for NEW/STRONGER signals"
+    description: "Generate watchlist deltas and fire daily_summary_email; reads previous-night scan"
 
   - name: rebalance
     schedule: "0 18 * * 0"  # 6 PM Sunday
