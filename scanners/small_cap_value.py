@@ -38,10 +38,17 @@ from typing import Dict, List, Optional
 
 import pandas as pd
 
+from src.http_utils import yfinance_session
+
 from .base import Scanner, ScanResult, empty_result
 from .universe import get_sp1500_universe
 
 log = logging.getLogger(__name__)
+
+try:
+    _YF_SESSION = yfinance_session(30)
+except Exception:
+    _YF_SESSION = None
 
 CACHE_DIR = Path("data_cache")
 FUNDAMENTALS_CACHE = CACHE_DIR / "yfinance_fundamentals"
@@ -219,7 +226,7 @@ class SmallCapValueScanner(Scanner):
     def _fetch_fundamentals(self, yf, symbol: str) -> Optional[Dict]:
         time.sleep(self.REQUEST_DELAY_SEC)
         try:
-            ticker = yf.Ticker(symbol)
+            ticker = yf.Ticker(symbol, session=_YF_SESSION)
             info = ticker.info
             if not info:
                 return None

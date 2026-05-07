@@ -23,6 +23,7 @@ from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame
 
 from .config import BrokerCredentials
+from .http_utils import apply_default_timeout
 
 log = logging.getLogger(__name__)
 
@@ -79,6 +80,7 @@ def fetch_bars(
         api_key=creds.api_key,
         secret_key=creds.secret_key,
     )
+    apply_default_timeout(client._session, 60)
 
     result: Dict[str, pd.DataFrame] = {}
     to_fetch: List[str] = []

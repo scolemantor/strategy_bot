@@ -41,10 +41,17 @@ from typing import Dict, Optional
 
 import pandas as pd
 
+from src.http_utils import yfinance_session
+
 from .base import Scanner, ScanResult, empty_result
 from .finra_client import fetch_short_interest, find_latest_published
 
 log = logging.getLogger(__name__)
+
+try:
+    _YF_SESSION = yfinance_session(30)
+except Exception:
+    _YF_SESSION = None
 
 
 class _DowngradeYfinanceNoise(logging.Filter):
@@ -210,7 +217,7 @@ class ShortSqueezeScanner(Scanner):
 
             try:
                 time.sleep(self.REQUEST_DELAY_SEC)
-                ticker = yf.Ticker(symbol)
+                ticker = yf.Ticker(symbol, session=_YF_SESSION)
                 info = ticker.info
                 float_shares = info.get("floatShares") or info.get("sharesOutstanding")
                 if float_shares:

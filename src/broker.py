@@ -16,6 +16,7 @@ from alpaca.trading.enums import OrderSide, TimeInForce
 from alpaca.trading.requests import MarketOrderRequest
 
 from .config import BrokerCredentials
+from .http_utils import apply_default_timeout
 
 log = logging.getLogger(__name__)
 
@@ -56,10 +57,12 @@ class AlpacaBroker:
             secret_key=creds.secret_key,
             paper=creds.paper,
         )
+        apply_default_timeout(self._trading._session, 60)
         self._data = StockHistoricalDataClient(
             api_key=creds.api_key,
             secret_key=creds.secret_key,
         )
+        apply_default_timeout(self._data._session, 60)
         self.paper = creds.paper
 
     def get_account(self) -> Account:

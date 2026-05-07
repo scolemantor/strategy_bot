@@ -16,6 +16,7 @@ from alpaca.trading.enums import AssetClass, AssetExchange, AssetStatus
 from alpaca.trading.requests import GetAssetsRequest
 
 from src.config import load_credentials
+from src.http_utils import apply_default_timeout
 
 log = logging.getLogger(__name__)
 
@@ -49,6 +50,7 @@ def get_us_equity_universe(force_refresh: bool = False) -> List[str]:
         secret_key=creds.secret_key,
         paper=creds.paper,
     )
+    apply_default_timeout(client._session, 60)
 
     req = GetAssetsRequest(status=AssetStatus.ACTIVE, asset_class=AssetClass.US_EQUITY)
     assets = client.get_all_assets(req)

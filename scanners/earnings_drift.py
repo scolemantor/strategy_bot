@@ -30,10 +30,17 @@ from typing import Dict, List, Optional
 
 import pandas as pd
 
+from src.http_utils import yfinance_session
+
 from .base import Scanner, ScanResult, empty_result
 from .universe import get_sp500_universe
 
 log = logging.getLogger(__name__)
+
+try:
+    _YF_SESSION = yfinance_session(30)
+except Exception:
+    _YF_SESSION = None
 
 EARNINGS_CACHE_DIR = Path("data_cache/yfinance_earnings")
 EARNINGS_CACHE_TTL_HOURS = 6
@@ -152,7 +159,7 @@ class EarningsDriftScanner(Scanner):
             # Cache miss — fetch from yfinance with courtesy delay
             time.sleep(self.REQUEST_DELAY_SEC)
             try:
-                ticker = yf.Ticker(symbol)
+                ticker = yf.Ticker(symbol, session=_YF_SESSION)
                 earnings = ticker.get_earnings_dates(limit=8)
             except Exception as e:
                 log.debug(f"yfinance earnings fetch failed for {symbol}: {e}")
@@ -231,7 +238,7 @@ class EarningsDriftScanner(Scanner):
 
         # Now fetch price history to measure post-earnings drift
         try:
-            ticker = yf.Ticker(symbol)
+            ticker = yf.Ticker(symbol, session=_YF_SESSION)
             hist = ticker.history(
                 start=(latest_date - pd.Timedelta(days=2)).date(),
                 end=(pd.Timestamp(run_date) + pd.Timedelta(days=1)).date(),
@@ -331,7 +338,7 @@ def backtest_mode(as_of_date: date, output_dir=None) -> int:
             # Fetch earnings WITHOUT cache (cache stores today's view)
             time.sleep(scanner.REQUEST_DELAY_SEC)
             try:
-                ticker = yf.Ticker(symbol)
+                ticker = yf.Ticker(symbol, session=_YF_SESSION)
                 earnings = ticker.get_earnings_dates(limit=16)  # extra limit for older filtering
             except Exception:
                 continue
@@ -422,7 +429,7 @@ def _analyze_symbol_for_backtest(yf, symbol, as_of_date, cutoff, earnings, scann
             return None
 
     try:
-        ticker = yf.Ticker(symbol)
+        ticker = yf.Ticker(symbol, session=_YF_SESSION)
         hist = ticker.history(
             start=(latest_date - pd.Timedelta(days=2)).date(),
             end=(pd.Timestamp(as_of_date) + pd.Timedelta(days=1)).date(),

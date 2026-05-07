@@ -39,7 +39,14 @@ from typing import Dict, List, Optional, Set, Tuple
 
 import pandas as pd
 
+from src.http_utils import yfinance_session
+
 log = logging.getLogger(__name__)
+
+try:
+    _YF_SESSION = yfinance_session(30)
+except Exception:
+    _YF_SESSION = None
 
 CACHE_DIR = Path("data_cache")
 CONFIG_DIR = Path("config")
@@ -397,7 +404,7 @@ def _load_yfinance_fundamentals_batch(tickers: List[str]) -> Dict[str, Dict]:
     for i, ticker in enumerate(misses):
         try:
             time.sleep(0.2)  # rate limit
-            t = yf.Ticker(ticker)
+            t = yf.Ticker(ticker, session=_YF_SESSION)
             info = t.info
             data = {
                 "name": info.get("longName") or info.get("shortName"),

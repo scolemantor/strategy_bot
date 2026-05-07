@@ -44,9 +44,16 @@ import pandas as pd
 import requests
 from bs4 import BeautifulSoup
 
+from src.http_utils import yfinance_session
+
 from .base import Scanner, ScanResult, empty_result
 
 log = logging.getLogger(__name__)
+
+try:
+    _YF_SESSION = yfinance_session(30)
+except Exception:
+    _YF_SESSION = None
 
 CACHE_DIR = Path("data_cache")
 RTT_CACHE = CACHE_DIR / "rttnews_fda_calendar"
@@ -361,7 +368,7 @@ class FdaCalendarScanner(Scanner):
             return cached
 
         try:
-            ticker = yf.Ticker(symbol)
+            ticker = yf.Ticker(symbol, session=_YF_SESSION)
             # Try fast_info first (faster), fall back to info
             try:
                 cap = ticker.fast_info.get("market_cap")

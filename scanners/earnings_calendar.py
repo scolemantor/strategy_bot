@@ -35,10 +35,17 @@ from typing import Dict, List, Optional
 
 import pandas as pd
 
+from src.http_utils import yfinance_session
+
 from .base import Scanner, ScanResult, empty_result
 from .universe import get_sp1500_universe
 
 log = logging.getLogger(__name__)
+
+try:
+    _YF_SESSION = yfinance_session(30)
+except Exception:
+    _YF_SESSION = None
 
 CACHE_DIR = Path("data_cache")
 EARNINGS_CACHE = CACHE_DIR / "yfinance_earnings"
@@ -250,7 +257,7 @@ class EarningsCalendarScanner(Scanner):
         """Fetch next earnings date + last 4 quarters of historical earnings dates."""
         time.sleep(self.REQUEST_DELAY_SEC)
         try:
-            ticker = yf.Ticker(symbol)
+            ticker = yf.Ticker(symbol, session=_YF_SESSION)
 
             # Get historical earnings dates
             try:
