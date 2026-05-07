@@ -13,6 +13,7 @@ This module is only used for backtesting, never for live trading.
 from __future__ import annotations
 
 import logging
+import os
 import time
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -105,7 +106,7 @@ def fetch_bars(
         log.info(f"All {len(symbols)} symbols served from cache")
         return result
 
-    BATCH_SIZE = 100
+    BATCH_SIZE = int(os.environ.get("ALPACA_BATCH_SIZE", "100"))
     total_batches = (len(to_fetch) + BATCH_SIZE - 1) // BATCH_SIZE
     est_minutes = (total_batches * (BATCH_DELAY_SEC + 2)) / 60  # 0.5s throttle + ~2s/batch
     log.info(
@@ -115,12 +116,15 @@ def fetch_bars(
     )
 
     bars_data = {}
+    cumulative_rows = 0
+    loop_t0 = time.monotonic()
     for batch_idx in range(0, len(to_fetch), BATCH_SIZE):
         batch = to_fetch[batch_idx:batch_idx + BATCH_SIZE]
         batch_num = (batch_idx // BATCH_SIZE) + 1
         if batch_num > 1:
             time.sleep(BATCH_DELAY_SEC)
         log.info(f"  Batch {batch_num}/{total_batches}: fetching {len(batch)} symbols")
+        batch_t0 = time.monotonic()
         try:
             req = StockBarsRequest(
                 symbol_or_symbols=batch,
@@ -129,12 +133,27 @@ def fetch_bars(
                 end=datetime.combine(end, datetime.min.time()),
             )
             batch_bars = with_deadline(lambda: client.get_stock_bars(req), timeout=30, default=None)
+            batch_dt = time.monotonic() - batch_t0
             if batch_bars is None:
-                log.warning(f"Batch {batch_num} hit 30s deadline; skipping")
+                log.warning(f"  Batch {batch_num} hit 30s deadline after {batch_dt:.1f}s; skipping")
                 continue
             bars_data.update(batch_bars.data)
+            batch_rows = sum(len(v) for v in batch_bars.data.values())
+            cumulative_rows += batch_rows
+            total_elapsed = time.monotonic() - loop_t0
+            log.info(
+                f"  Batch {batch_num}/{total_batches} done in {batch_dt:.1f}s: "
+                f"{len(batch_bars.data)} symbols, {batch_rows:,} bars "
+                f"(cum: {cumulative_rows:,} bars, {total_elapsed:.0f}s)"
+            )
         except Exception as e:
-            log.warning(f"Batch {batch_num} failed: {e}; continuing with next batch")
+            batch_dt = time.monotonic() - batch_t0
+            log.warning(f"  Batch {batch_num} failed after {batch_dt:.1f}s: {e}; continuing with next batch")
+
+    total_elapsed = time.monotonic() - loop_t0
+    log.info(
+        f"Fetch complete: {len(bars_data)} symbols, {cumulative_rows:,} total bars in {total_elapsed:.0f}s"
+    )
 
     class _BarsContainer:
         def __init__(self, data):
