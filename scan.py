@@ -20,7 +20,7 @@ import traceback
 from datetime import date
 from pathlib import Path
 
-from scanners import SCANNERS, get_scanner, list_scanners
+from scanners import DISABLED_IN_SCAN_ALL, SCANNERS, get_scanner, list_scanners
 from scanners.base import save_result
 from scanners.investability import filter_candidates
 from scanners import watchlist as wl
@@ -143,6 +143,9 @@ def cmd_all(run_date: date, output_dir: Path, apply_filter: bool = True) -> None
     started_at = time.perf_counter()
 
     for name in SCANNERS:
+        if name in DISABLED_IN_SCAN_ALL:
+            log.info(f"Skipping {name} (disabled in scan_all; run via 'scan.py run {name}')")
+            continue
         log.info("=" * 60)
         log.info(f"Running: {name}")
         log.info("=" * 60)

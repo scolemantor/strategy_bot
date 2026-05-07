@@ -34,6 +34,12 @@ SCANNERS: Dict[str, Type[Scanner]] = {
     "insider_selling_clusters": InsiderSellingClustersScanner,
 }
 
+# Scanners temporarily skipped during `scan.py all` but still available
+# via `scan.py run NAME`. Add a comment with reason + date when disabling.
+DISABLED_IN_SCAN_ALL: set[str] = {
+    "breakout_52w",  # 2026-05-07: hangs partway through Alpaca bar fetch; investigation pending
+}
+
 
 def get_scanner(name: str) -> Scanner:
     if name not in SCANNERS:
