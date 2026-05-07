@@ -35,7 +35,7 @@ from typing import Dict, List, Optional
 
 import pandas as pd
 
-from src.http_utils import yfinance_session
+from src.http_utils import with_deadline, yfinance_session
 
 from .base import Scanner, ScanResult, empty_result
 from .universe import get_sp1500_universe
@@ -261,7 +261,7 @@ class EarningsCalendarScanner(Scanner):
 
             # Get historical earnings dates
             try:
-                eh = ticker.earnings_dates
+                eh = with_deadline(lambda: ticker.earnings_dates, timeout=30, default=None)
                 if eh is None or eh.empty:
                     historical = []
                 else:
@@ -276,7 +276,7 @@ class EarningsCalendarScanner(Scanner):
             next_earnings = None
             earnings_time = ""
             try:
-                cal = ticker.calendar
+                cal = with_deadline(lambda: ticker.calendar, timeout=30, default=None)
                 if cal:
                     earnings_dates = cal.get("Earnings Date")
                     if earnings_dates:

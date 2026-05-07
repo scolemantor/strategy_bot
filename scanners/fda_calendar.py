@@ -44,7 +44,7 @@ import pandas as pd
 import requests
 from bs4 import BeautifulSoup
 
-from src.http_utils import yfinance_session
+from src.http_utils import with_deadline, yfinance_session
 
 from .base import Scanner, ScanResult, empty_result
 
@@ -371,12 +371,14 @@ class FdaCalendarScanner(Scanner):
             ticker = yf.Ticker(symbol, session=_YF_SESSION)
             # Try fast_info first (faster), fall back to info
             try:
-                cap = ticker.fast_info.get("market_cap")
+                fi = with_deadline(lambda: ticker.fast_info, timeout=15, default=None)
+                cap = fi.get("market_cap") if fi is not None else None
             except Exception:
                 cap = None
             if cap is None or cap == 0:
                 try:
-                    cap = ticker.info.get("marketCap")
+                    info = with_deadline(lambda: ticker.info, timeout=30, default=None)
+                    cap = info.get("marketCap") if info is not None else None
                 except Exception:
                     cap = None
             cap = float(cap) if cap else None

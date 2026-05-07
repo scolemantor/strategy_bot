@@ -23,7 +23,7 @@ from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame
 
 from .config import BrokerCredentials
-from .http_utils import apply_default_timeout
+from .http_utils import apply_default_timeout, with_deadline
 
 log = logging.getLogger(__name__)
 
@@ -119,7 +119,10 @@ def fetch_bars(
                 start=datetime.combine(start, datetime.min.time()),
                 end=datetime.combine(end, datetime.min.time()),
             )
-            batch_bars = client.get_stock_bars(req)
+            batch_bars = with_deadline(lambda: client.get_stock_bars(req), timeout=90, default=None)
+            if batch_bars is None:
+                log.warning(f"Batch {batch_num} hit 90s deadline; skipping")
+                continue
             bars_data.update(batch_bars.data)
         except Exception as e:
             log.warning(f"Batch {batch_num} failed: {e}; continuing with next batch")

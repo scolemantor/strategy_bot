@@ -41,7 +41,7 @@ from typing import Dict, Optional
 
 import pandas as pd
 
-from src.http_utils import yfinance_session
+from src.http_utils import with_deadline, yfinance_session
 
 from .base import Scanner, ScanResult, empty_result
 from .finra_client import fetch_short_interest, find_latest_published
@@ -218,10 +218,14 @@ class ShortSqueezeScanner(Scanner):
             try:
                 time.sleep(self.REQUEST_DELAY_SEC)
                 ticker = yf.Ticker(symbol, session=_YF_SESSION)
-                info = ticker.info
-                float_shares = info.get("floatShares") or info.get("sharesOutstanding")
-                if float_shares:
-                    float_shares = float(float_shares)
+                info = with_deadline(lambda: ticker.info, timeout=30, default=None)
+                if info is None:
+                    log.debug(f"  yfinance float deadline for {symbol}")
+                    float_shares = None
+                else:
+                    float_shares = info.get("floatShares") or info.get("sharesOutstanding")
+                    if float_shares:
+                        float_shares = float(float_shares)
             except Exception as e:
                 log.debug(f"  yfinance float fetch failed for {symbol}: {e}")
                 float_shares = None

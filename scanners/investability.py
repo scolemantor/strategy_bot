@@ -39,7 +39,7 @@ from typing import Dict, List, Optional, Set, Tuple
 
 import pandas as pd
 
-from src.http_utils import yfinance_session
+from src.http_utils import with_deadline, yfinance_session
 
 log = logging.getLogger(__name__)
 
@@ -405,7 +405,11 @@ def _load_yfinance_fundamentals_batch(tickers: List[str]) -> Dict[str, Dict]:
         try:
             time.sleep(0.2)  # rate limit
             t = yf.Ticker(ticker, session=_YF_SESSION)
-            info = t.info
+            info = with_deadline(lambda: t.info, timeout=30, default=None)
+            if info is None:
+                log.debug(f"  yfinance fundamentals deadline for {ticker}")
+                out[ticker] = {}
+                continue
             data = {
                 "name": info.get("longName") or info.get("shortName"),
                 "market_cap": info.get("marketCap"),

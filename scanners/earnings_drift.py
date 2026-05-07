@@ -30,7 +30,7 @@ from typing import Dict, List, Optional
 
 import pandas as pd
 
-from src.http_utils import yfinance_session
+from src.http_utils import with_deadline, yfinance_session
 
 from .base import Scanner, ScanResult, empty_result
 from .universe import get_sp500_universe
@@ -160,7 +160,7 @@ class EarningsDriftScanner(Scanner):
             time.sleep(self.REQUEST_DELAY_SEC)
             try:
                 ticker = yf.Ticker(symbol, session=_YF_SESSION)
-                earnings = ticker.get_earnings_dates(limit=8)
+                earnings = with_deadline(lambda: ticker.get_earnings_dates(limit=8), timeout=30, default=None)
             except Exception as e:
                 log.debug(f"yfinance earnings fetch failed for {symbol}: {e}")
                 return None
@@ -239,9 +239,13 @@ class EarningsDriftScanner(Scanner):
         # Now fetch price history to measure post-earnings drift
         try:
             ticker = yf.Ticker(symbol, session=_YF_SESSION)
-            hist = ticker.history(
-                start=(latest_date - pd.Timedelta(days=2)).date(),
-                end=(pd.Timestamp(run_date) + pd.Timedelta(days=1)).date(),
+            hist = with_deadline(
+                lambda: ticker.history(
+                    start=(latest_date - pd.Timedelta(days=2)).date(),
+                    end=(pd.Timestamp(run_date) + pd.Timedelta(days=1)).date(),
+                ),
+                timeout=30,
+                default=None,
             )
         except Exception as e:
             log.debug(f"history fetch failed for {symbol}: {e}")
@@ -339,7 +343,7 @@ def backtest_mode(as_of_date: date, output_dir=None) -> int:
             time.sleep(scanner.REQUEST_DELAY_SEC)
             try:
                 ticker = yf.Ticker(symbol, session=_YF_SESSION)
-                earnings = ticker.get_earnings_dates(limit=16)  # extra limit for older filtering
+                earnings = with_deadline(lambda: ticker.get_earnings_dates(limit=16), timeout=30, default=None)
             except Exception:
                 continue
 
@@ -430,9 +434,13 @@ def _analyze_symbol_for_backtest(yf, symbol, as_of_date, cutoff, earnings, scann
 
     try:
         ticker = yf.Ticker(symbol, session=_YF_SESSION)
-        hist = ticker.history(
-            start=(latest_date - pd.Timedelta(days=2)).date(),
-            end=(pd.Timestamp(as_of_date) + pd.Timedelta(days=1)).date(),
+        hist = with_deadline(
+            lambda: ticker.history(
+                start=(latest_date - pd.Timedelta(days=2)).date(),
+                end=(pd.Timestamp(as_of_date) + pd.Timedelta(days=1)).date(),
+            ),
+            timeout=30,
+            default=None,
         )
     except Exception:
         return None

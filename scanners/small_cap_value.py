@@ -38,7 +38,7 @@ from typing import Dict, List, Optional
 
 import pandas as pd
 
-from src.http_utils import yfinance_session
+from src.http_utils import with_deadline, yfinance_session
 
 from .base import Scanner, ScanResult, empty_result
 from .universe import get_sp1500_universe
@@ -227,7 +227,7 @@ class SmallCapValueScanner(Scanner):
         time.sleep(self.REQUEST_DELAY_SEC)
         try:
             ticker = yf.Ticker(symbol, session=_YF_SESSION)
-            info = ticker.info
+            info = with_deadline(lambda: ticker.info, timeout=30, default=None)
             if not info:
                 return None
 
