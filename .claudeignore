@@ -1,0 +1,34 @@
+# Caches and outputs - huge, not relevant to code work
+data_cache/
+scan_output/
+backtest_output/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+.pytest_cache/
+
+# Data files - read explicitly when needed
+*.parquet
+*.csv
+*.json
+!config/*.yaml
+!config/*.json
+
+# Git internals
+.git/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs from the running backtest - tail explicitly when needed
+*.log
+nohup.out
