@@ -2,19 +2,19 @@ timezone: America/New_York
 
 jobs:
   - name: scan_all
-    schedule: "30 8 * * 1-5"  # 8:30 AM Mon-Fri
+    schedule: "30 6 * * 1-5"  # 6:30 AM Mon-Fri
     command: "python scan.py all"
     timeout_minutes: 90
     description: "Run all 13 scanners on weekdays before market open"
 
   - name: meta_ranker
-    schedule: "30 9 * * 1-5"  # 9:30 AM Mon-Fri (after scan_all)
+    schedule: "0 9 * * 1-5"  # 9:00 AM Mon-Fri (after scan_all, 2.5h budget)
     command: "python -m scanners.meta_ranker --date $(date +%F)"
     timeout_minutes: 5
     description: "Aggregate scanner output into master_ranked.csv"
 
   - name: watchlist_digest
-    schedule: "35 9 * * 1-5"  # 9:35 AM Mon-Fri (after meta_ranker)
+    schedule: "5 9 * * 1-5"  # 9:05 AM Mon-Fri (5 min after meta_ranker)
     command: "python scan.py watch digest --date $(date +%F)"
     timeout_minutes: 5
     description: "Generate watchlist deltas, fire alerts for NEW/STRONGER signals"
