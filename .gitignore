@@ -23,5 +23,5 @@ backtest_output.txt
 data_cache
 scan_output
 scan_output/
-test_parser.py
-test_*.py
+/test_parser.py
+/test_*.py
