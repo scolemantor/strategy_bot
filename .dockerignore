@@ -1,0 +1,49 @@
+# Generated outputs (not for production image)
+data_cache/
+scan_output/
+backtest_output/
+logs/
+
+# Python build artifacts
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+*.egg-info/
+build/
+dist/
+
+# Git internals
+.git/
+.gitignore
+
+# Tests not needed in production image
+tests/
+
+# Secrets injected via env_file or runtime env, never baked into image
+.env
+*.env
+
+# Data files outside config
+*.parquet
+*.csv
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Claude config
+.claude/
+.claudeignore
+
+# Docs/plans (CLAUDE.md kept intentionally for any in-container Claude usage)
+*.md
+!CLAUDE.md
+PROJECT_STATE.md

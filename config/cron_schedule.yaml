@@ -1,0 +1,38 @@
+timezone: America/New_York
+
+jobs:
+  - name: scan_all
+    schedule: "30 8 * * 1-5"  # 8:30 AM Mon-Fri
+    command: "python scan.py all"
+    timeout_minutes: 90
+    description: "Run all 13 scanners on weekdays before market open"
+
+  - name: meta_ranker
+    schedule: "30 9 * * 1-5"  # 9:30 AM Mon-Fri (after scan_all)
+    command: "python -m scanners.meta_ranker --date $(date +%F)"
+    timeout_minutes: 5
+    description: "Aggregate scanner output into master_ranked.csv"
+
+  - name: watchlist_digest
+    schedule: "35 9 * * 1-5"  # 9:35 AM Mon-Fri (after meta_ranker)
+    command: "python scan.py watch digest --date $(date +%F)"
+    timeout_minutes: 5
+    description: "Generate watchlist deltas, fire alerts for NEW/STRONGER signals"
+
+  - name: rebalance
+    schedule: "0 18 * * 0"  # 6 PM Sunday
+    command: "python scan.py rebalance"
+    timeout_minutes: 30
+    description: "Weekly portfolio rebalance (paper account for now)"
+
+  - name: log_rotation
+    schedule: "0 3 * * *"  # 3 AM daily
+    command: "python -m src.logging_v2.query maintain"
+    timeout_minutes: 5
+    description: "Daily log gzip + retention pass"
+
+dead_man_switch:
+  enabled: true
+  ping_interval_minutes: 60
+  alert_after_silent_minutes: 90
+  endpoint: http://localhost:8000/api/health

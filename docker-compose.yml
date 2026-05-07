@@ -1,0 +1,26 @@
+version: "3.9"
+
+services:
+  strategy_bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: strategy_bot:latest
+    container_name: strategy_bot
+    restart: unless-stopped
+    env_file: .env
+    command: python -m src.api.health
+    ports:
+      - "8000:8000"
+    volumes:
+      # Bind mounts so data_cache and logs survive container rebuilds.
+      - ./data_cache:/app/data_cache
+      - ./logs:/app/logs
+      - ./scan_output:/app/scan_output
+      - ./backtest_output:/app/backtest_output
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/api/health"]
+      interval: 60s
+      timeout: 10s
+      start_period: 30s
+      retries: 3
