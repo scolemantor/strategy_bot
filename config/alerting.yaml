@@ -1,0 +1,31 @@
+pushover:
+  user_key: env:PUSHOVER_USER_KEY
+  app_token: env:PUSHOVER_APP_TOKEN
+  test_mode: false
+
+severity_routing:
+  CRITICAL:
+    priority: 2
+    sound: siren
+    retry_seconds: 60      # priority 2 only
+    expire_seconds: 1800   # priority 2 only
+    rate_limit_per_hour: 10
+    bypasses_quiet_hours: true
+  OPERATIONAL:
+    priority: 0
+    sound: pushover
+    rate_limit_per_hour: 20
+    bypasses_quiet_hours: false
+  INFO:
+    priority: -1
+    sound: none
+    rate_limit_per_hour: 5
+    bypasses_quiet_hours: false
+
+quiet_hours:
+  enabled: true
+  start: "22:00"
+  end: "06:00"
+  timezone: America/New_York
+
+dedup_window_minutes: 15
