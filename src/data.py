@@ -3,6 +3,11 @@
 Pulls daily OHLC bars from Alpaca for a list of symbols and a date range.
 Caches results to disk as parquet so repeated backtests are fast.
 
+Cache strategy: merge fetched bars with existing cache rather than overwrite.
+This is critical for Phase 4e backtest replay which calls fetch_bars with
+many overlapping date windows — the cache must accumulate full history,
+not just the most-recently-requested window.
+
 This module is only used for backtesting, never for live trading.
 """
 from __future__ import annotations
@@ -43,8 +48,18 @@ def _load_cached(symbol: str) -> pd.DataFrame | None:
 
 
 def _save_cached(symbol: str, df: pd.DataFrame) -> None:
+    """Save bars to cache. Merges with existing cached data so we accumulate
+    full history across multiple fetches with different date windows."""
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    df.to_parquet(_cache_path(symbol))
+    existing = _load_cached(symbol)
+    if existing is not None and not existing.empty:
+        # Merge: combine, dedupe by index, sort
+        combined = pd.concat([existing, df])
+        combined = combined[~combined.index.duplicated(keep="last")]
+        combined = combined.sort_index()
+        combined.to_parquet(_cache_path(symbol))
+    else:
+        df.to_parquet(_cache_path(symbol))
 
 
 def fetch_bars(
@@ -54,7 +69,12 @@ def fetch_bars(
     creds: BrokerCredentials,
     use_cache: bool = True,
 ) -> Dict[str, pd.DataFrame]:
-    """Return a DataFrame of daily bars for each symbol, indexed by date."""
+    """Return a DataFrame of daily bars for each symbol, indexed by date.
+
+    Cache is consulted first. A symbol is re-fetched only if cached data does
+    not cover the requested [start, end] window. Fetched bars are merged into
+    the cache rather than overwriting it.
+    """
     client = StockHistoricalDataClient(
         api_key=creds.api_key,
         secret_key=creds.secret_key,
@@ -74,17 +94,15 @@ def fetch_bars(
                         (cached.index >= pd.Timestamp(start)) &
                         (cached.index <= pd.Timestamp(end))
                     ]
-                    log.info(f"Using cached bars for {symbol} ({len(result[symbol])} days)")
                     continue
         to_fetch.append(symbol)
 
     if not to_fetch:
+        log.info(f"All {len(symbols)} symbols served from cache")
         return result
 
-    # Alpaca rejects requests with 414 URI-too-long when too many symbols
-    # are passed in a single call. Chunk into batches of 100 to stay safe.
     BATCH_SIZE = 100
-    log.info(f"Fetching {len(to_fetch)} symbols from Alpaca in batches of {BATCH_SIZE}")
+    log.info(f"Fetching {len(to_fetch)} symbols from Alpaca in batches of {BATCH_SIZE} ({len(symbols) - len(to_fetch)} from cache)")
 
     bars_data = {}
     total_batches = (len(to_fetch) + BATCH_SIZE - 1) // BATCH_SIZE
@@ -104,7 +122,6 @@ def fetch_bars(
         except Exception as e:
             log.warning(f"Batch {batch_num} failed: {e}; continuing with next batch")
 
-    # Wrap in an object that mimics the original .data attribute access
     class _BarsContainer:
         def __init__(self, data):
             self.data = data
@@ -132,10 +149,23 @@ def fetch_bars(
             continue
         df["timestamp"] = pd.to_datetime(df["timestamp"]).dt.tz_localize(None)
         df = df.set_index("timestamp").sort_index()
-        result[symbol] = df
+
         if use_cache:
             _save_cached(symbol, df)
-            log.info(f"Cached {len(df)} bars for {symbol}")
+            # After cache merge, return the FULL cache for downstream use,
+            # not just the freshly-fetched portion. This way the caller
+            # gets all available history including data fetched in earlier
+            # calls with different windows.
+            full_cached = _load_cached(symbol)
+            if full_cached is not None:
+                result[symbol] = full_cached.loc[
+                    (full_cached.index >= pd.Timestamp(start)) &
+                    (full_cached.index <= pd.Timestamp(end))
+                ]
+            else:
+                result[symbol] = df
+        else:
+            result[symbol] = df
 
     return result
 
