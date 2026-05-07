@@ -5,7 +5,7 @@ volume. Classic momentum signal: when a stock makes new highs everyone owns
 it at a profit, there's no overhead supply, and breakouts can run.
 
 Pipeline:
-  1. Load the US equity universe from Alpaca
+  1. Load the S&P 1500 universe (Wikipedia, cached weekly)
   2. Fetch ~260 days of daily bars per symbol (52 weeks + buffer)
   3. For each symbol, check: did the latest close exceed the trailing 252-day high?
   4. Compute: how high above prior high (breakout %), volume ratio (today vs avg)
@@ -33,7 +33,7 @@ from src.config import load_credentials
 from src.data import fetch_bars
 
 from .base import Scanner, ScanResult, empty_result
-from .universe import get_us_equity_universe
+from .universe import get_sp1500_universe
 
 log = logging.getLogger(__name__)
 
@@ -55,7 +55,7 @@ class Breakout52wScanner(Scanner):
 
     def run(self, run_date: date) -> ScanResult:
         try:
-            universe = get_us_equity_universe()
+            universe = get_sp1500_universe()
         except Exception as e:
             log.exception("Failed to load universe")
             return empty_result(self.name, run_date, error=f"universe: {e}")
@@ -75,7 +75,9 @@ class Breakout52wScanner(Scanner):
         end = run_date
 
         try:
-            bars = fetch_bars(universe, start, end, creds, use_cache=True)
+            # batch_size=150: 1506 S&P 1500 symbols / 150 = 11 batches, safely below
+            # the ~16-batch hang threshold seen in full-universe runs.
+            bars = fetch_bars(universe, start, end, creds, use_cache=True, batch_size=150)
         except Exception as e:
             log.exception("Failed to fetch bars")
             return empty_result(self.name, run_date, error=f"bars fetch: {e}")
@@ -193,7 +195,7 @@ def backtest_mode(as_of_date: date, output_dir=None) -> int:
     scanner = Breakout52wScanner()
 
     try:
-        universe = get_us_equity_universe()
+        universe = get_sp1500_universe()
     except Exception as e:
         log.warning(f"breakout_52w backtest_mode: universe load failed: {e}")
         return 0
@@ -211,7 +213,7 @@ def backtest_mode(as_of_date: date, output_dir=None) -> int:
     end = as_of_date
 
     try:
-        bars = fetch_bars(universe, start, end, creds, use_cache=True)
+        bars = fetch_bars(universe, start, end, creds, use_cache=True, batch_size=150)
     except Exception as e:
         log.warning(f"breakout_52w backtest_mode: bars fetch failed: {e}")
         return 0

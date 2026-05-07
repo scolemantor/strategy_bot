@@ -17,7 +17,7 @@ import os
 import time
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import pandas as pd
 from alpaca.data.historical import StockHistoricalDataClient
@@ -72,6 +72,7 @@ def fetch_bars(
     end: date,
     creds: BrokerCredentials,
     use_cache: bool = True,
+    batch_size: Optional[int] = None,
 ) -> Dict[str, pd.DataFrame]:
     """Return a DataFrame of daily bars for each symbol, indexed by date.
 
@@ -106,7 +107,7 @@ def fetch_bars(
         log.info(f"All {len(symbols)} symbols served from cache")
         return result
 
-    BATCH_SIZE = int(os.environ.get("ALPACA_BATCH_SIZE", "100"))
+    BATCH_SIZE = batch_size if batch_size is not None else int(os.environ.get("ALPACA_BATCH_SIZE", "100"))
     total_batches = (len(to_fetch) + BATCH_SIZE - 1) // BATCH_SIZE
     est_minutes = (total_batches * (BATCH_DELAY_SEC + 2)) / 60  # 0.5s throttle + ~2s/batch
     log.info(
