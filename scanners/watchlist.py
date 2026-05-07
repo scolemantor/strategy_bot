@@ -393,6 +393,7 @@ def run_digest(run_date: date, output_dir: Path = Path("scan_output")) -> pd.Dat
     log.info(f"  Wrote {digest_path} ({len(digest_df)} rows)")
 
     _emit_watchlist_alerts(digest_df)
+    _emit_daily_summary_email(run_date, output_dir, digest_df)
 
     return digest_df
 
@@ -418,3 +419,95 @@ def _emit_watchlist_alerts(digest_df: pd.DataFrame) -> None:
             ))
     except Exception as e:
         log.warning(f"watchlist alerting hook failed: {e}")
+
+
+def _emit_daily_summary_email(
+    run_date: date,
+    output_dir: Path,
+    digest_df: pd.DataFrame,
+) -> None:
+    """Fire the rich daily_summary_email at the end of the morning sequence.
+
+    Reads master_ranked.csv + conflicts.csv from today's scan_output/<date>/
+    so the email body has the full picture from all three morning jobs.
+    Pushover suppresses this event_type via config; only the email channel
+    dispatches it.
+
+    Wrapped in try/except so any failure here never blocks digest_df from
+    returning to the caller.
+    """
+    try:
+        from src.alerting.setup import init_default_bridge
+        from src.alerting import bridge, events
+        init_default_bridge()
+
+        date_dir = Path(output_dir) / run_date.isoformat()
+        master_path = date_dir / "master_ranked.csv"
+        conflicts_path = date_dir / "conflicts.csv"
+
+        top_picks = []
+        candidates_count = 0
+        if master_path.exists():
+            mdf = pd.read_csv(master_path)
+            candidates_count = len(mdf)
+            for _, r in mdf.head(10).iterrows():
+                top_picks.append({
+                    "ticker": str(r.get("ticker", "")),
+                    "composite_score": float(r.get("composite_score", 0.0)),
+                    "scanners_hit": str(r.get("scanners_hit", "")),
+                })
+
+        conflicts_list = []
+        conflicts_count = 0
+        if conflicts_path.exists():
+            cdf = pd.read_csv(conflicts_path)
+            conflicts_count = len(cdf)
+            for _, r in cdf.iterrows():
+                conflicts_list.append({
+                    "ticker": str(r.get("ticker", "")),
+                    "directions": str(r.get("directions", "")),
+                    "scanners_hit": str(r.get("scanners_hit", "")),
+                })
+
+        watchlist_deltas = []
+        if not digest_df.empty and "delta_flag" in digest_df.columns:
+            wl_signals = digest_df[
+                digest_df["delta_flag"].isin(["NEW", "STRONGER", "WEAKER", "DROPPED"])
+            ]
+            for _, r in wl_signals.iterrows():
+                watchlist_deltas.append({
+                    "ticker": str(r.get("ticker", "")),
+                    "signal_type": str(r.get("delta_flag", "")),
+                    "scanner": str(r.get("scanner", "")),
+                    "change": str(r.get("scanner_reason", ""))[:200],
+                })
+
+        attachments = []
+        if master_path.exists():
+            attachments.append(str(master_path))
+
+        # scan_count = how many scanner CSVs landed today (excluding aggregates)
+        scan_count = 0
+        if date_dir.exists():
+            for p in date_dir.glob("*.csv"):
+                if p.name in (
+                    "master_ranked.csv", "conflicts.csv",
+                    "category_summary.csv", "watchlist_digest.csv",
+                ):
+                    continue
+                if p.name.endswith("_rejected.csv"):
+                    continue
+                scan_count += 1
+
+        bridge.alert(events.daily_summary_email(
+            scan_count=scan_count,
+            candidates_count=candidates_count,
+            conflicts_count=conflicts_count,
+            watchlist_signals_count=len(watchlist_deltas),
+            top_picks=top_picks,
+            conflicts=conflicts_list,
+            watchlist_deltas=watchlist_deltas,
+            attachments=attachments,
+        ))
+    except Exception as e:
+        log.warning(f"daily_summary_email hook failed: {e}")

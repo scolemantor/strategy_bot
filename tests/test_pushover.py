@@ -321,6 +321,60 @@ def test_network_failure_logged_and_returns_false(config_factory, fixed_clock_no
 
 # === CLI ===
 
+def test_skip_for_event_types_suppresses_dispatch(config_factory, fixed_clock_noon):
+    """Alerts with source matching skip_for_event_types are suppressed early."""
+    logger = MagicMock()
+    cfg = config_factory(pushover={
+        "user_key": "env:PUSHOVER_USER_KEY",
+        "app_token": "env:PUSHOVER_APP_TOKEN",
+        "test_mode": False,
+        "skip_for_event_types": ["daily_summary_email"],
+    })
+    d = pv.PushoverDispatcher(config_path=cfg, logger=logger, clock=fixed_clock_noon)
+
+    # event_type derived from source: "src.alerting.events.daily_summary_email"
+    skipped = Alert(
+        severity="OPERATIONAL", title="Daily summary", body="x",
+        timestamp=datetime(2026, 5, 6, 14, 30, tzinfo=timezone.utc),
+        source="src.alerting.events.daily_summary_email",
+    )
+
+    with patch.object(pv.requests, "post") as mp:
+        ok = d.dispatch(skipped)
+
+    assert ok is False
+    mp.assert_not_called()
+    suppressed_calls = [
+        c for c in logger.log.call_args_list
+        if c.args[0] == "alert_suppressed"
+    ]
+    assert any(
+        c.kwargs.get("payload", {}).get("reason") == "event_type_excluded"
+        for c in suppressed_calls
+    )
+
+
+def test_skip_for_event_types_does_not_affect_other_events(config_factory, fixed_clock_noon):
+    """Non-matching event_type still dispatches normally."""
+    cfg = config_factory(pushover={
+        "user_key": "env:PUSHOVER_USER_KEY",
+        "app_token": "env:PUSHOVER_APP_TOKEN",
+        "test_mode": False,
+        "skip_for_event_types": ["daily_summary_email"],
+    })
+    d = pv.PushoverDispatcher(config_path=cfg, clock=fixed_clock_noon)
+
+    normal = Alert(
+        severity="OPERATIONAL", title="Scanner done", body="x",
+        timestamp=datetime(2026, 5, 6, 14, 30, tzinfo=timezone.utc),
+        source="src.alerting.events.scanner_complete",
+    )
+    with patch.object(pv.requests, "post", return_value=_mock_response()) as mp:
+        ok = d.dispatch(normal)
+    assert ok is True
+    mp.assert_called_once()
+
+
 def test_cli_test_subcommand(config_factory):
     cfg = config_factory(pushover={
         "user_key": "env:PUSHOVER_USER_KEY",

@@ -29,6 +29,7 @@ Module-level singleton:
 from __future__ import annotations
 
 import sys
+from pathlib import Path
 from typing import Any, Optional
 
 from . import Alert
@@ -46,14 +47,20 @@ class AlertBridge:
         self,
         dispatcher: Optional[Any] = None,   # forward-typed PushoverDispatcher
         logger: Optional[Any] = None,       # forward-typed JsonLinesLogger
+        email_channel: Optional[Any] = None,  # forward-typed EmailChannel
     ):
         self._dispatcher = dispatcher
         self._logger = logger
+        self._email_channel = email_channel
 
     def raise_alert(self, alert: Alert) -> bool:
-        if self._dispatcher is None and self._logger is None:
+        if (
+            self._dispatcher is None
+            and self._logger is None
+            and self._email_channel is None
+        ):
             sys.stderr.write(
-                f"AlertBridge: no dispatcher or logger configured, "
+                f"AlertBridge: no dispatcher / logger / email configured, "
                 f"alert dropped: {alert.title}\n"
             )
             return False
@@ -61,10 +68,30 @@ class AlertBridge:
         # Log first so the audit record exists even if dispatch fails.
         log_ok = self._log_alert(alert)
 
+        # Pushover (self-skips alerts whose event_type is in skip_for_event_types).
+        pushover_result = None
         if self._dispatcher is not None:
-            return self._dispatcher.dispatch(alert)
+            pushover_result = self._dispatcher.dispatch(alert)
 
-        # Logger-only mode: True iff logger.log didn't raise.
+        # Email (self-filters by severity + send_only_for_event_types). Failure
+        # here must NOT change the bridge's return value -- email is best-effort.
+        if self._email_channel is not None:
+            try:
+                attachment_paths = [
+                    Path(p) for p in (alert.payload or {}).get("attachments", [])
+                ]
+                self._email_channel.dispatch(alert, attachments=attachment_paths)
+            except Exception as e:
+                sys.stderr.write(
+                    f"AlertBridge: email_channel.dispatch raised {type(e).__name__}: "
+                    f"{e}; email skipped, Pushover unaffected\n"
+                )
+
+        # Return value semantics:
+        #   - dispatcher present -> dispatcher's result wins
+        #   - else -> logger-only mode, True iff log_ok
+        if pushover_result is not None:
+            return pushover_result
         return log_ok
 
     def _log_alert(self, alert: Alert) -> bool:
@@ -96,10 +123,15 @@ _bridge: Optional[AlertBridge] = None
 def init(
     dispatcher: Optional[Any] = None,
     logger: Optional[Any] = None,
+    email_channel: Optional[Any] = None,
 ) -> None:
     """Set up the module-level singleton. Call once at startup."""
     global _bridge
-    _bridge = AlertBridge(dispatcher=dispatcher, logger=logger)
+    _bridge = AlertBridge(
+        dispatcher=dispatcher,
+        logger=logger,
+        email_channel=email_channel,
+    )
 
 
 def alert(a: Alert) -> bool:

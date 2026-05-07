@@ -55,4 +55,17 @@ def init_default_bridge(
             "Pushover disabled\n"
         )
 
-    bridge.init(dispatcher=dispatcher, logger=logger)
+    email_channel = None
+    try:
+        from .email_channel import EmailChannel
+        email_channel = EmailChannel(
+            config_path=pushover_config,  # same alerting.yaml file
+            logger=logger,
+        )
+    except Exception as e:
+        sys.stderr.write(
+            f"alerting.setup: EmailChannel init failed ({e}); "
+            "email disabled\n"
+        )
+
+    bridge.init(dispatcher=dispatcher, logger=logger, email_channel=email_channel)

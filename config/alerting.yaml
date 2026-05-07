@@ -2,6 +2,8 @@ pushover:
   user_key: env:PUSHOVER_USER_KEY
   app_token: env:PUSHOVER_APP_TOKEN
   test_mode: false
+  skip_for_event_types:
+    - daily_summary_email   # email-only event; Pushover suppresses
 
 severity_routing:
   CRITICAL:
@@ -29,3 +31,16 @@ quiet_hours:
   timezone: America/New_York
 
 dedup_window_minutes: 15
+
+email:
+  smtp_host: smtp.gmail.com
+  smtp_port: 587
+  smtp_user: env:SMTP_USER
+  smtp_password: env:SMTP_PASSWORD
+  smtp_to:               # null/empty -> EmailChannel falls back to env:SMTP_TO, then to smtp_user
+  test_mode: false
+  send_for_severities:
+    - OPERATIONAL
+  send_only_for_event_types:
+    - daily_summary_email
+  attach_master_ranked: true

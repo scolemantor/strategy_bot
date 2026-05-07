@@ -38,6 +38,20 @@ PUSHOVER_TITLE_MAX = 250
 PUSHOVER_BODY_MAX = 1024
 DEFAULT_TIMEOUT_SECONDS = 10
 
+EVENT_TYPE_SOURCE_PREFIX = "src.alerting.events."
+
+
+def _event_type_from_source(source: str) -> str:
+    """Extract the event_type from canonical source.
+
+    Alerts built via events.py have source of the form
+    'src.alerting.events.<func_name>'; the func_name is the event_type.
+    Fall back to the full source string for non-canonical alerts.
+    """
+    if source and source.startswith(EVENT_TYPE_SOURCE_PREFIX):
+        return source[len(EVENT_TYPE_SOURCE_PREFIX):]
+    return source or ""
+
 
 class PushoverDispatcher:
     def __init__(
@@ -57,6 +71,7 @@ class PushoverDispatcher:
         self._user_key = pushover_cfg.get("user_key")
         self._app_token = pushover_cfg.get("app_token")
         self._test_mode = bool(pushover_cfg.get("test_mode", False))
+        self._skip_event_types = set(pushover_cfg.get("skip_for_event_types") or [])
         if not self._user_key or not self._app_token:
             raise ValueError(
                 f"pushover.user_key and pushover.app_token are required in {config_path}"
@@ -72,6 +87,13 @@ class PushoverDispatcher:
     # === public API ===
 
     def dispatch(self, alert: Alert) -> bool:
+        # Gate 0: event_type skip list (email-only events skip Pushover).
+        # Alert has no explicit event_type field; the function name embedded
+        # in alert.source ("src.alerting.events.<name>") IS the event_type.
+        if _event_type_from_source(alert.source) in self._skip_event_types:
+            self._log_suppressed(alert, "event_type_excluded")
+            return False
+
         # Gate 1: quiet hours
         reason = self._check_quiet_hours(alert)
         if reason:

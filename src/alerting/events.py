@@ -18,7 +18,7 @@ Callers: `from src.alerting.events import kill_switch_triggered`.
 from __future__ import annotations
 
 from datetime import date, datetime, timezone
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from . import Alert
 
@@ -280,6 +280,56 @@ def daily_summary(
             "daily_pnl": daily_pnl,
         },
         dedup_key=f"daily_summary:{_date_iso(ts)}",
+    )
+
+
+def daily_summary_email(
+    scan_count: int,
+    candidates_count: int,
+    conflicts_count: int,
+    watchlist_signals_count: int,
+    top_picks: List[Dict[str, Any]],
+    conflicts: List[Dict[str, Any]],
+    watchlist_deltas: List[Dict[str, Any]],
+    *,
+    attachments: Optional[List[str]] = None,
+    clock: Optional[DefaultClock] = None,
+) -> Alert:
+    """Rich daily summary intended for email channel only.
+
+    Distinct event_type from `daily_summary` so:
+      - Pushover suppresses this via config.pushover.skip_for_event_types
+      - Email channel matches via config.email.send_only_for_event_types
+
+    payload contains the full structured data the email template needs.
+    Account state fields stay 0.0 placeholders (broker integration is
+    Phase 7a); the email template renders that section as a placeholder
+    until then.
+    """
+    ts = _now(clock)
+    return _build_alert(
+        severity="OPERATIONAL",
+        title=f"Daily summary {_date_iso(ts)}",
+        body=(
+            f"Scans run:           {scan_count}\n"
+            f"Candidates:          {candidates_count}\n"
+            f"Conflicts:           {conflicts_count}\n"
+            f"Watchlist signals:   {watchlist_signals_count}\n"
+            f"Top picks attached.  See HTML email for full report."
+        ),
+        ts=ts,
+        source_func_name="daily_summary_email",
+        payload={
+            "scan_count": scan_count,
+            "candidates_count": candidates_count,
+            "conflicts_count": conflicts_count,
+            "watchlist_signals_count": watchlist_signals_count,
+            "top_picks": top_picks,
+            "conflicts": conflicts,
+            "watchlist_deltas": watchlist_deltas,
+            "attachments": attachments or [],
+        },
+        dedup_key=f"daily_summary_email:{_date_iso(ts)}",
     )
 
 
