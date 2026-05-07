@@ -13,6 +13,7 @@ This module is only used for backtesting, never for live trading.
 from __future__ import annotations
 
 import logging
+import time
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Dict, List
@@ -28,6 +29,7 @@ from .http_utils import apply_default_timeout, with_deadline
 log = logging.getLogger(__name__)
 
 CACHE_DIR = Path("data_cache")
+BATCH_DELAY_SEC = 0.5  # throttle Alpaca batch fetches; ~2 req/sec
 
 
 def _cache_path(symbol: str) -> Path:
@@ -104,13 +106,20 @@ def fetch_bars(
         return result
 
     BATCH_SIZE = 100
-    log.info(f"Fetching {len(to_fetch)} symbols from Alpaca in batches of {BATCH_SIZE} ({len(symbols) - len(to_fetch)} from cache)")
+    total_batches = (len(to_fetch) + BATCH_SIZE - 1) // BATCH_SIZE
+    est_minutes = (total_batches * (BATCH_DELAY_SEC + 2)) / 60  # 0.5s throttle + ~2s/batch
+    log.info(
+        f"Fetching {len(to_fetch)} symbols from Alpaca in batches of {BATCH_SIZE} "
+        f"with {BATCH_DELAY_SEC}s throttle (~{est_minutes:.1f} min); "
+        f"{len(symbols) - len(to_fetch)} from cache"
+    )
 
     bars_data = {}
-    total_batches = (len(to_fetch) + BATCH_SIZE - 1) // BATCH_SIZE
     for batch_idx in range(0, len(to_fetch), BATCH_SIZE):
         batch = to_fetch[batch_idx:batch_idx + BATCH_SIZE]
         batch_num = (batch_idx // BATCH_SIZE) + 1
+        if batch_num > 1:
+            time.sleep(BATCH_DELAY_SEC)
         log.info(f"  Batch {batch_num}/{total_batches}: fetching {len(batch)} symbols")
         try:
             req = StockBarsRequest(
@@ -119,9 +128,9 @@ def fetch_bars(
                 start=datetime.combine(start, datetime.min.time()),
                 end=datetime.combine(end, datetime.min.time()),
             )
-            batch_bars = with_deadline(lambda: client.get_stock_bars(req), timeout=90, default=None)
+            batch_bars = with_deadline(lambda: client.get_stock_bars(req), timeout=30, default=None)
             if batch_bars is None:
-                log.warning(f"Batch {batch_num} hit 90s deadline; skipping")
+                log.warning(f"Batch {batch_num} hit 30s deadline; skipping")
                 continue
             bars_data.update(batch_bars.data)
         except Exception as e:

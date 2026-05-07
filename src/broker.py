@@ -6,6 +6,7 @@ plain dataclasses so the rest of the code never imports from alpaca.*.
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass
 from typing import Dict, List, Optional
 
@@ -16,7 +17,8 @@ from alpaca.trading.enums import OrderSide, TimeInForce
 from alpaca.trading.requests import MarketOrderRequest
 
 from .config import BrokerCredentials
-from .http_utils import apply_default_timeout
+from .data import BATCH_DELAY_SEC
+from .http_utils import apply_default_timeout, with_deadline
 
 log = logging.getLogger(__name__)
 
@@ -89,7 +91,12 @@ class AlpacaBroker:
         """Return midpoint of bid/ask for a single symbol, or 0 if unavailable."""
         try:
             req = StockLatestQuoteRequest(symbol_or_symbols=[symbol])
-            resp = self._data.get_stock_latest_quote(req)
+            resp = with_deadline(
+                lambda: self._data.get_stock_latest_quote(req), timeout=30, default=None,
+            )
+            if resp is None:
+                log.warning(f"get_quote deadline for {symbol}")
+                return 0.0
             quote = resp[symbol]
             bid = float(quote.bid_price) if quote.bid_price else 0.0
             ask = float(quote.ask_price) if quote.ask_price else 0.0
@@ -106,7 +113,11 @@ class AlpacaBroker:
             return {}
         try:
             req = StockLatestQuoteRequest(symbol_or_symbols=symbols)
-            resp = self._data.get_stock_latest_quote(req)
+            resp = with_deadline(
+                lambda: self._data.get_stock_latest_quote(req), timeout=30, default=None,
+            )
+            if resp is None:
+                raise TimeoutError("batch quote deadline")
             quotes: Dict[str, float] = {}
             for sym in symbols:
                 if sym not in resp:
@@ -122,7 +133,12 @@ class AlpacaBroker:
             return quotes
         except Exception as e:
             log.warning(f"Batch quote fetch failed, falling back to per-symbol: {e}")
-            return {s: self.get_quote(s) for s in symbols}
+            fallback: Dict[str, float] = {}
+            for i, s in enumerate(symbols):
+                if i > 0:
+                    time.sleep(BATCH_DELAY_SEC)
+                fallback[s] = self.get_quote(s)
+            return fallback
 
     def is_market_open(self) -> bool:
         try:
