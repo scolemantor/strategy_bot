@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 from dataclasses import dataclass
 from datetime import date, timedelta
@@ -44,6 +45,48 @@ from .base import Scanner, ScanResult, empty_result
 from .finra_client import fetch_short_interest, find_latest_published
 
 log = logging.getLogger(__name__)
+
+
+class _DowngradeYfinanceNoise(logging.Filter):
+    """Downgrade yfinance's quote-not-found/404 ERROR records to DEBUG.
+
+    yfinance's internal logger emits ERROR-level messages whenever a ticker
+    has no quote (delisted, warrant, preferred — common in FINRA short
+    interest data). These are expected, not failures. Downgrade so they
+    only appear when running at DEBUG, not at INFO+.
+    """
+    NOISE_PATTERNS = (
+        "quote not found",
+        "no price data",
+        "possibly delisted",
+        "404 client error",
+    )
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.levelno == logging.ERROR:
+            msg = record.getMessage().lower()
+            if any(p in msg for p in self.NOISE_PATTERNS):
+                record.levelno = logging.DEBUG
+                record.levelname = "DEBUG"
+        return True
+
+
+logging.getLogger("yfinance").addFilter(_DowngradeYfinanceNoise())
+
+
+# Strict non-equity ticker patterns. Bare W/U/R suffixes are intentionally
+# NOT matched — would drop Unity (U), Wayfair (W), NCR/AMR/BMR.
+_NON_EQUITY_SUFFIX_RE = re.compile(
+    r"^[A-Z]+(WS|WT|PR[A-Z])$"   # warrants ABCWS/ABCWT, preferreds BACPRP/GDLPRC
+    r"|^[A-Z]+\.[UR]$"           # NYSE units (ABC.U) and rights (ABC.R)
+)
+
+
+def _is_non_equity_ticker(symbol: str) -> bool:
+    if not symbol:
+        return False
+    return bool(_NON_EQUITY_SUFFIX_RE.match(symbol.upper().strip()))
+
 
 CACHE_DIR = Path("data_cache")
 FLOAT_CACHE_DIR = CACHE_DIR / "yfinance_float"
@@ -133,7 +176,17 @@ class ShortSqueezeScanner(Scanner):
             ].copy()
             log.info(f"Exchange filter (listed only): {before} -> {len(si_df)}")
 
-        # Step 5: enrich with float data from yfinance
+        # Step 5a: drop non-equity tickers (warrants, preferreds, units, rights)
+        # before the yfinance loop. These reliably have no float data and just
+        # generate noise. Strict suffix matching only — see _is_non_equity_ticker.
+        before = len(si_df)
+        si_df = si_df[~si_df["symbol"].map(_is_non_equity_ticker)].copy()
+        log.info(f"Non-equity ticker pre-filter: {before} -> {len(si_df)}")
+
+        if si_df.empty:
+            return empty_result(self.name, run_date)
+
+        # Step 5b: enrich with float data from yfinance
         try:
             import yfinance as yf
         except ImportError:
