@@ -340,7 +340,50 @@ def aggregate(
     summary_df.to_csv(summary_path, index=False)
     log.info(f"  Wrote {summary_path}")
 
+    _emit_alerts(run_date, scanner_summary, master_df, conflicts_df)
+
     return master_df, conflicts_df, summary_df
+
+
+def _emit_alerts(run_date, scanner_summary, master_df, conflicts_df) -> None:
+    """Fire daily_summary alert + log meta_ranker_complete. Wrapped in try/except
+    so any alerting failure never blocks aggregate() from returning."""
+    try:
+        from src.alerting.setup import init_default_bridge
+        from src.alerting import bridge, events
+        init_default_bridge()
+
+        scan_count = sum(1 for s in scanner_summary if s.get("candidates", 0) > 0)
+        candidates_count = len(master_df) if master_df is not None else 0
+        conflicts_count = (
+            len(conflicts_df) if conflicts_df is not None and not conflicts_df.empty else 0
+        )
+
+        bridge.alert(events.daily_summary(
+            scan_count=scan_count,
+            candidates_count=candidates_count,
+            conflicts_count=conflicts_count,
+            watchlist_signals_count=0,         # populated by watchlist.py separately
+            account_value=0.0,                 # placeholder - Phase 7 wires broker
+            daily_pnl=0.0,                     # placeholder
+        ))
+
+        if bridge.is_initialized():
+            from src.alerting.bridge import _bridge
+            if _bridge is not None and _bridge._logger is not None:
+                _bridge._logger.log(
+                    "meta_ranker_complete",
+                    f"meta-ranker aggregated {candidates_count} tickers ({conflicts_count} conflicts)",
+                    level="INFO",
+                    payload={
+                        "run_date": run_date.isoformat(),
+                        "scan_count": scan_count,
+                        "candidates_count": candidates_count,
+                        "conflicts_count": conflicts_count,
+                    },
+                )
+    except Exception as e:
+        log.warning(f"meta_ranker alerting hook failed: {e}")
 
 
 def cli():

@@ -13,7 +13,10 @@ from __future__ import annotations
 
 import argparse
 import logging
+import socket
 import sys
+import time
+import traceback
 from datetime import date
 from pathlib import Path
 
@@ -21,6 +24,10 @@ from scanners import SCANNERS, get_scanner, list_scanners
 from scanners.base import save_result
 from scanners.investability import filter_candidates
 from scanners import watchlist as wl
+from src.alerting import bridge, events
+from src.alerting.setup import init_default_bridge
+
+APP_VERSION = "0.4e"
 
 
 def setup_logging(level: str = "INFO") -> None:
@@ -39,15 +46,42 @@ def cmd_list() -> None:
     print()
 
 
-def cmd_run(name: str, run_date: date, output_dir: Path, apply_filter: bool = True) -> None:
+def cmd_run(name: str, run_date: date, output_dir: Path, apply_filter: bool = True) -> dict:
+    """Run a single scanner.
+
+    Returns {count, errors, runtime_seconds} for cmd_all aggregation. The
+    `python scan.py run NAME` CLI path discards the return value.
+    """
     log = logging.getLogger("scan")
     scanner = get_scanner(name)
     log.info(f"Running scanner: {scanner}")
 
-    result = scanner.run(run_date)
+    start_t = time.perf_counter()
+    try:
+        result = scanner.run(run_date)
+    except Exception as e:
+        runtime = time.perf_counter() - start_t
+        bridge.alert(events.scanner_exception(
+            scanner_name=name,
+            exception_class=type(e).__name__,
+            exception_message=str(e),
+            traceback=traceback.format_exc(),
+        ))
+        log.exception(f"{name} raised {type(e).__name__}; continuing")
+        return {"count": 0, "errors": 1, "runtime_seconds": runtime}
+    runtime = time.perf_counter() - start_t
+
+    errors = 1 if result.error else 0
+    bridge.alert(events.scanner_complete(
+        scanner_name=name,
+        candidates_count=result.count,
+        runtime_seconds=runtime,
+        errors_count=errors,
+    ))
+
     if result.error:
         log.error(f"{name} failed: {result.error}")
-        return
+        return {"count": 0, "errors": 1, "runtime_seconds": runtime}
 
     if result.notes:
         for n in result.notes:
@@ -55,7 +89,7 @@ def cmd_run(name: str, run_date: date, output_dir: Path, apply_filter: bool = Tr
     log.info(f"{name}: {result.count} candidate(s) raw")
 
     if result.count == 0:
-        return
+        return {"count": 0, "errors": 0, "runtime_seconds": runtime}
 
     if apply_filter:
         try:
@@ -84,6 +118,8 @@ def cmd_run(name: str, run_date: date, output_dir: Path, apply_filter: bool = Tr
     else:
         log.info(f"{name}: 0 candidates after investability filter")
 
+    return {"count": result.count, "errors": errors, "runtime_seconds": runtime}
+
 
 def _save_rejected(rejected_df, scanner_name: str, run_date: date, output_dir: Path) -> None:
     """Save rejected candidates to <scanner>_rejected.csv for audit trail."""
@@ -100,11 +136,48 @@ def _save_rejected(rejected_df, scanner_name: str, run_date: date, output_dir: P
 
 def cmd_all(run_date: date, output_dir: Path, apply_filter: bool = True) -> None:
     log = logging.getLogger("scan")
+    bridge.alert(events.scan_started(scanner_count=len(SCANNERS)))
+
+    total_candidates = 0
+    total_errors = 0
+    started_at = time.perf_counter()
+
     for name in SCANNERS:
         log.info("=" * 60)
         log.info(f"Running: {name}")
         log.info("=" * 60)
-        cmd_run(name, run_date, output_dir, apply_filter=apply_filter)
+        result = cmd_run(name, run_date, output_dir, apply_filter=apply_filter)
+        if result is not None:
+            total_candidates += result.get("count", 0)
+            total_errors += result.get("errors", 0)
+
+    elapsed = time.perf_counter() - started_at
+
+    # Logger-only suite-complete event (no Pushover; meta_ranker fires daily_summary)
+    _log_suite_complete(run_date, total_candidates, total_errors, elapsed)
+
+
+def _log_suite_complete(run_date: date, total_candidates: int, total_errors: int, elapsed: float) -> None:
+    """Log a 'scan_suite_complete' event via the bridge's logger if present.
+    No-op if bridge or logger not initialized. Never raises."""
+    try:
+        from src.alerting.bridge import _bridge
+        if _bridge is None or _bridge._logger is None:
+            return
+        _bridge._logger.log(
+            "scan_suite_complete",
+            f"All {len(SCANNERS)} scanners run for {run_date}",
+            level="INFO",
+            payload={
+                "scan_count": len(SCANNERS),
+                "total_candidates_raw": total_candidates,
+                "total_errors": total_errors,
+                "runtime_seconds": elapsed,
+                "run_date": run_date.isoformat(),
+            },
+        )
+    except Exception:
+        pass
 
 
 def cmd_watch(args, output_dir: Path) -> None:
@@ -203,6 +276,9 @@ def main() -> None:
 
     setup_logging(args.log_level)
     output_dir = Path(args.output_dir)
+
+    init_default_bridge()
+    bridge.alert(events.system_startup(version=APP_VERSION, hostname=socket.gethostname()))
 
     if args.command == "list":
         cmd_list()

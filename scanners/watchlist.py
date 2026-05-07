@@ -392,4 +392,29 @@ def run_digest(run_date: date, output_dir: Path = Path("scan_output")) -> pd.Dat
     digest_df.to_csv(digest_path, index=False)
     log.info(f"  Wrote {digest_path} ({len(digest_df)} rows)")
 
+    _emit_watchlist_alerts(digest_df)
+
     return digest_df
+
+
+def _emit_watchlist_alerts(digest_df: pd.DataFrame) -> None:
+    """Fire one watchlist_signal alert per NEW or STRONGER delta. Each alert's
+    dedup_key embeds (ticker, signal_type, date) so re-runs don't spam.
+    Wrapped in try/except so any alerting failure never blocks digest."""
+    if digest_df is None or digest_df.empty or "delta_flag" not in digest_df.columns:
+        return
+    try:
+        from src.alerting.setup import init_default_bridge
+        from src.alerting import bridge, events
+        init_default_bridge()
+
+        signals = digest_df[digest_df["delta_flag"].isin(["NEW", "STRONGER"])]
+        for _, row in signals.iterrows():
+            bridge.alert(events.watchlist_signal(
+                ticker=str(row.get("ticker", "")),
+                signal_type=str(row.get("delta_flag", "")),
+                scanner=str(row.get("scanner", "")),
+                change_description=str(row.get("scanner_reason", ""))[:200],
+            ))
+    except Exception as e:
+        log.warning(f"watchlist alerting hook failed: {e}")
