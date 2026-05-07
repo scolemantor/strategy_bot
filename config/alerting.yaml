@@ -33,11 +33,10 @@ quiet_hours:
 dedup_window_minutes: 15
 
 email:
-  smtp_host: smtp.gmail.com
-  smtp_port: 587
-  smtp_user: env:SMTP_USER
-  smtp_password: env:SMTP_PASSWORD
-  smtp_to:               # null/empty -> EmailChannel falls back to env:SMTP_TO, then to smtp_user
+  provider: resend
+  resend_api_key: env:RESEND_API_KEY    # required; raises if env unset
+  resend_from:                          # null -> EmailChannel reads RESEND_FROM env / sandbox default
+  resend_to:                            # null -> EmailChannel reads RESEND_TO env / SMTP_TO env / default
   test_mode: false
   send_for_severities:
     - OPERATIONAL

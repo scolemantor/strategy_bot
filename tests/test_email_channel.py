@@ -1,14 +1,17 @@
 """Tests for src/alerting/email_channel.py.
 
-All tests mock smtplib.SMTP. No real Gmail hits.
+All tests mock httpx.post. No real Resend API hits.
 """
 from __future__ import annotations
 
+import base64
 import copy
+import json
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import httpx
 import pytest
 import yaml
 
@@ -30,11 +33,10 @@ CANONICAL_CONFIG = {
                     "timezone": "America/New_York"},
     "dedup_window_minutes": 15,
     "email": {
-        "smtp_host": "smtp.gmail.com",
-        "smtp_port": 587,
-        "smtp_user": "env:SMTP_USER",
-        "smtp_password": "env:SMTP_PASSWORD",
-        "smtp_to": None,
+        "provider": "resend",
+        "resend_api_key": "env:RESEND_API_KEY",
+        "resend_from": None,
+        "resend_to": None,
         "test_mode": False,
         "send_for_severities": ["OPERATIONAL"],
         "send_only_for_event_types": ["daily_summary_email"],
@@ -47,16 +49,16 @@ CANONICAL_CONFIG = {
 def env_creds(monkeypatch):
     monkeypatch.setenv("PUSHOVER_USER_KEY", "px_user")
     monkeypatch.setenv("PUSHOVER_APP_TOKEN", "px_token")
-    monkeypatch.setenv("SMTP_USER", "test@example.com")
-    monkeypatch.setenv("SMTP_PASSWORD", "test_password")
+    monkeypatch.setenv("RESEND_API_KEY", "re_test_key")
+    # SMTP_TO / RESEND_TO / RESEND_FROM unset by default; tests opt in
 
 
 @pytest.fixture
 def config_factory(tmp_path):
-    def _factory(**email_overrides) -> Path:
+    def _factory(**overrides) -> Path:
         cfg = copy.deepcopy(CANONICAL_CONFIG)
-        if email_overrides:
-            cfg["email"].update(email_overrides)
+        if overrides:
+            cfg["email"].update(overrides)
         path = tmp_path / "alerting.yaml"
         path.write_text(yaml.safe_dump(cfg))
         return path
@@ -68,7 +70,6 @@ def _make_alert(
     event_type="daily_summary_email",
     payload=None,
 ):
-    """event_type is encoded in source per the canonical events.py convention."""
     return Alert(
         severity=severity,
         title="Daily summary 2026-05-09",
@@ -85,37 +86,54 @@ def _make_alert(
     )
 
 
-# === core dispatch behavior ===
+def _ok_response(status_code=200):
+    r = MagicMock()
+    r.status_code = status_code
+    r.json.return_value = {"id": "re_123abc"}
+    r.text = '{"id":"re_123abc"}'
+    return r
 
-def test_dispatch_renders_html_and_plaintext(config_factory):
+
+def _err_response(status_code=403):
+    r = MagicMock()
+    r.status_code = status_code
+    r.json.return_value = {"error": "forbidden"}
+    r.text = '{"error":"forbidden"}'
+    return r
+
+
+# === API call shape ===
+
+def test_dispatch_calls_resend_api_with_correct_shape(config_factory):
     cfg = config_factory()
     channel = ec.EmailChannel(config_path=cfg)
     alert = _make_alert()
 
-    captured_msg = {}
-
-    class FakeSMTP:
-        def __init__(self, host, port, timeout=None):
-            captured_msg["host"] = host
-            captured_msg["port"] = port
-        def __enter__(self): return self
-        def __exit__(self, *a): pass
-        def starttls(self): pass
-        def login(self, u, p):
-            captured_msg["login"] = (u, p)
-        def send_message(self, msg):
-            captured_msg["msg"] = msg
-
-    # Patch smtplib by monkeypatching module attribute on email_channel
-    with patch.object(ec.smtplib, "SMTP", FakeSMTP):
+    with patch.object(ec.httpx, "post", return_value=_ok_response()) as mp:
         ok = channel.dispatch(alert)
 
     assert ok is True
-    msg = captured_msg["msg"]
-    # walk the multipart looking for plain + html parts
-    types = [p.get_content_type() for p in msg.walk()]
-    assert "text/plain" in types
-    assert "text/html" in types
+    mp.assert_called_once()
+    args, kwargs = mp.call_args
+    assert args[0] == ec.RESEND_API_URL
+    headers = kwargs["headers"]
+    assert headers["Authorization"] == "Bearer re_test_key"
+    assert headers["Content-Type"] == "application/json"
+    body = kwargs["json"]
+    for key in ("from", "to", "subject", "html", "text"):
+        assert key in body
+    assert body["from"] == ec.DEFAULT_RESEND_FROM
+    assert body["to"] == [ec.DEFAULT_RESEND_TO]
+
+
+def test_dispatch_subject_includes_date(config_factory):
+    cfg = config_factory()
+    channel = ec.EmailChannel(config_path=cfg)
+    alert = _make_alert()
+    with patch.object(ec.httpx, "post", return_value=_ok_response()) as mp:
+        channel.dispatch(alert)
+    body = mp.call_args.kwargs["json"]
+    assert body["subject"] == "strategy_bot daily summary — 2026-05-09"
 
 
 def test_dispatch_attaches_files(config_factory, tmp_path):
@@ -126,43 +144,59 @@ def test_dispatch_attaches_files(config_factory, tmp_path):
     attachment = tmp_path / "master_ranked.csv"
     attachment.write_text("ticker,composite_score\nAAPL,90.0\n")
 
-    captured = {}
-    class FakeSMTP:
-        def __init__(self, *a, **kw): pass
-        def __enter__(self): return self
-        def __exit__(self, *a): pass
-        def starttls(self): pass
-        def login(self, *a): pass
-        def send_message(self, msg):
-            captured["msg"] = msg
-
-    with patch.object(ec.smtplib, "SMTP", FakeSMTP):
+    with patch.object(ec.httpx, "post", return_value=_ok_response()) as mp:
         ok = channel.dispatch(alert, attachments=[attachment])
 
     assert ok is True
-    msg = captured["msg"]
-    # Find the attachment part by Content-Disposition
-    found = False
-    for p in msg.walk():
-        cd = p.get("Content-Disposition", "")
-        if "attachment" in cd and "master_ranked.csv" in cd:
-            found = True
-            break
-    assert found, f"attachment not found in MIME parts; CDs: {[p.get('Content-Disposition') for p in msg.walk()]}"
+    body = mp.call_args.kwargs["json"]
+    assert "attachments" in body
+    assert len(body["attachments"]) == 1
+    att = body["attachments"][0]
+    assert att["filename"] == "master_ranked.csv"
+    assert att["content_type"] == "text/csv"
+    decoded = base64.b64decode(att["content"])
+    assert b"AAPL,90.0" in decoded
 
 
-def test_dispatch_handles_smtp_failure(config_factory):
+def test_csv_attachment_uses_text_csv_content_type(config_factory, tmp_path):
+    cfg = config_factory()
+    channel = ec.EmailChannel(config_path=cfg)
+    alert = _make_alert()
+
+    csv_path = tmp_path / "report.csv"
+    csv_path.write_text("a,b\n1,2\n")
+
+    with patch.object(ec.httpx, "post", return_value=_ok_response()) as mp:
+        channel.dispatch(alert, attachments=[csv_path])
+
+    att = mp.call_args.kwargs["json"]["attachments"][0]
+    assert att["content_type"] == "text/csv"
+
+
+def test_unknown_extension_uses_octet_stream(config_factory, tmp_path):
+    cfg = config_factory()
+    channel = ec.EmailChannel(config_path=cfg)
+    alert = _make_alert()
+
+    weird = tmp_path / "report.xyzbinary"
+    weird.write_bytes(b"\x00\x01\x02")
+
+    with patch.object(ec.httpx, "post", return_value=_ok_response()) as mp:
+        channel.dispatch(alert, attachments=[weird])
+
+    att = mp.call_args.kwargs["json"]["attachments"][0]
+    assert att["content_type"] == "application/octet-stream"
+
+
+# === HTTP error / status handling ===
+
+def test_dispatch_handles_http_error(config_factory):
     logger = MagicMock()
     cfg = config_factory()
     channel = ec.EmailChannel(config_path=cfg, logger=logger)
     alert = _make_alert()
 
-    class FakeSMTP:
-        def __init__(self, *a, **kw): pass
-        def __enter__(self): raise ConnectionError("network down")
-        def __exit__(self, *a): pass
-
-    with patch.object(ec.smtplib, "SMTP", FakeSMTP):
+    with patch.object(ec.httpx, "post", side_effect=httpx.ConnectError("network down")):
         ok = channel.dispatch(alert)
 
     assert ok is False
@@ -170,13 +204,40 @@ def test_dispatch_handles_smtp_failure(config_factory):
     assert len(failure_calls) == 1
 
 
+def test_dispatch_handles_non_2xx_response(config_factory):
+    logger = MagicMock()
+    cfg = config_factory()
+    channel = ec.EmailChannel(config_path=cfg, logger=logger)
+    alert = _make_alert()
+
+    with patch.object(ec.httpx, "post", return_value=_err_response(403)):
+        ok = channel.dispatch(alert)
+
+    assert ok is False
+    failure_calls = [c for c in logger.log.call_args_list if c.args[0] == "alert_email_failed"]
+    assert len(failure_calls) == 1
+    payload = failure_calls[0].kwargs["payload"]
+    assert payload["status_code"] == 403
+
+
+def test_dispatch_accepts_202_as_success(config_factory):
+    cfg = config_factory()
+    channel = ec.EmailChannel(config_path=cfg)
+    alert = _make_alert()
+    with patch.object(ec.httpx, "post", return_value=_ok_response(202)):
+        ok = channel.dispatch(alert)
+    assert ok is True
+
+
+# === test_mode ===
+
 def test_test_mode_writes_html_to_disk(config_factory, tmp_path, monkeypatch):
     monkeypatch.setenv("LOG_DIR", str(tmp_path / "logs"))
     cfg = config_factory(test_mode=True)
     channel = ec.EmailChannel(config_path=cfg)
     alert = _make_alert()
 
-    with patch.object(ec.smtplib, "SMTP", side_effect=AssertionError("must not call SMTP")):
+    with patch.object(ec.httpx, "post", side_effect=AssertionError("must not call API")):
         ok = channel.dispatch(alert)
 
     assert ok is True
@@ -184,77 +245,107 @@ def test_test_mode_writes_html_to_disk(config_factory, tmp_path, monkeypatch):
     assert expected.exists()
 
 
+# === credentials / env fallback ===
+
 def test_loads_credentials_from_env(config_factory):
     cfg = config_factory()
     channel = ec.EmailChannel(config_path=cfg)
-    assert channel._smtp_user == "test@example.com"
-    assert channel._smtp_password == "test_password"
-    # smtp_to falls back to smtp_user when config null and SMTP_TO env unset
-    assert channel._smtp_to == "test@example.com"
+    assert channel._api_key == "re_test_key"
 
+
+def test_missing_resend_api_key_raises(config_factory, monkeypatch):
+    monkeypatch.delenv("RESEND_API_KEY", raising=False)
+    cfg = config_factory()
+    with pytest.raises(ValueError) as excinfo:
+        ec.EmailChannel(config_path=cfg)
+    assert "RESEND_API_KEY" in str(excinfo.value)
+
+
+def test_resend_to_falls_back_to_smtp_to(config_factory, monkeypatch):
+    monkeypatch.delenv("RESEND_TO", raising=False)
+    monkeypatch.setenv("SMTP_TO", "legacy@example.com")
+    cfg = config_factory()
+    channel = ec.EmailChannel(config_path=cfg)
+    assert channel._to == "legacy@example.com"
+
+
+def test_resend_to_falls_back_to_default_when_no_env(config_factory, monkeypatch):
+    monkeypatch.delenv("RESEND_TO", raising=False)
+    monkeypatch.delenv("SMTP_TO", raising=False)
+    cfg = config_factory()
+    channel = ec.EmailChannel(config_path=cfg)
+    assert channel._to == ec.DEFAULT_RESEND_TO
+
+
+def test_resend_from_defaults_to_sandbox_when_no_env(config_factory, monkeypatch):
+    monkeypatch.delenv("RESEND_FROM", raising=False)
+    cfg = config_factory()
+    channel = ec.EmailChannel(config_path=cfg)
+    assert channel._from == ec.DEFAULT_RESEND_FROM
+
+
+def test_resend_from_uses_env_when_set(config_factory, monkeypatch):
+    monkeypatch.setenv("RESEND_FROM", "alerts@mydomain.com")
+    cfg = config_factory()
+    channel = ec.EmailChannel(config_path=cfg)
+    assert channel._from == "alerts@mydomain.com"
+
+
+# === filter behavior ===
 
 def test_only_sends_for_configured_events(config_factory):
-    """An OPERATIONAL alert with a non-matching event_type must be suppressed."""
     cfg = config_factory()
     channel = ec.EmailChannel(config_path=cfg)
-    # event_type is derived from source; "scanner_complete" source != daily_summary_email
-    bad = Alert(
-        severity="OPERATIONAL", title="Scanner done", body="x",
-        timestamp=datetime(2026, 5, 9, 14, 32, tzinfo=timezone.utc),
-        source="src.alerting.events.scanner_complete",
-        payload={},
-    )
+    bad = _make_alert(event_type="scanner_complete")
 
-    with patch.object(ec.smtplib, "SMTP", side_effect=AssertionError("must not call SMTP")):
+    with patch.object(ec.httpx, "post", side_effect=AssertionError("must not call API")):
         ok = channel.dispatch(bad)
 
-    assert ok is False  # filtered out
-
-    # Severity mismatch also filters
-    info_alert = Alert(
-        severity="INFO", title="System startup", body="x",
-        timestamp=datetime(2026, 5, 9, 14, 32, tzinfo=timezone.utc),
-        source="src.alerting.events.daily_summary_email",  # event_type matches
-        payload={},
-    )
-    with patch.object(ec.smtplib, "SMTP", side_effect=AssertionError("must not call SMTP")):
-        ok = channel.dispatch(info_alert)
-    assert ok is False  # severity INFO not in send_for_severities=[OPERATIONAL]
+    assert ok is False
 
 
-def test_subject_includes_date(config_factory):
+def test_severity_mismatch_filters_out(config_factory):
     cfg = config_factory()
     channel = ec.EmailChannel(config_path=cfg)
-    alert = _make_alert()
-    msg = channel._build_message(alert, attachments=[])
-    assert "2026-05-09" in msg["Subject"]
-    assert "strategy_bot daily summary" in msg["Subject"]
+    bad = _make_alert(severity="INFO")  # event_type matches but severity doesn't
 
+    with patch.object(ec.httpx, "post", side_effect=AssertionError("must not call API")):
+        ok = channel.dispatch(bad)
+
+    assert ok is False
+
+
+# === attachment edge cases ===
 
 def test_missing_attachment_logged_and_continues(config_factory, tmp_path):
     cfg = config_factory()
     channel = ec.EmailChannel(config_path=cfg)
     alert = _make_alert()
 
-    class FakeSMTP:
-        def __init__(self, *a, **kw): pass
-        def __enter__(self): return self
-        def __exit__(self, *a): pass
-        def starttls(self): pass
-        def login(self, *a): pass
-        def send_message(self, msg): pass
-
     nonexistent = tmp_path / "ghost.csv"
-    with patch.object(ec.smtplib, "SMTP", FakeSMTP):
+    with patch.object(ec.httpx, "post", return_value=_ok_response()) as mp:
         ok = channel.dispatch(alert, attachments=[nonexistent])
 
-    assert ok is True   # missing attachment doesn't fail dispatch
+    assert ok is True
+    body = mp.call_args.kwargs["json"]
+    assert "attachments" not in body  # missing file is silently skipped
 
+
+# === provider gate ===
+
+def test_provider_must_be_resend(config_factory):
+    cfg = config_factory(provider="ses")
+    with pytest.raises(ValueError) as excinfo:
+        ec.EmailChannel(config_path=cfg)
+    assert "resend" in str(excinfo.value).lower()
+
+
+# === CLI ===
 
 def test_cli_test_subcommand(config_factory, tmp_path, monkeypatch):
     monkeypatch.setenv("LOG_DIR", str(tmp_path / "logs"))
     cfg = config_factory(test_mode=True)
-    with patch.object(ec.smtplib, "SMTP", side_effect=AssertionError("must not call API")):
+    with patch.object(ec.httpx, "post", side_effect=AssertionError("must not call API")):
         with pytest.raises(SystemExit) as excinfo:
             ec.main(["--config", str(cfg), "test"])
     assert excinfo.value.code == 0

@@ -1,12 +1,19 @@
-"""SMTP email channel for the daily summary email.
+"""Resend HTTP API email channel for the daily summary email.
+
+Uses httpx.post to https://api.resend.com/emails (port 443, unblocked
+on cloud VMs). Auth via Bearer token from RESEND_API_KEY env var.
+
+DigitalOcean and most cloud hosts block outbound port 587, so the
+earlier Gmail SMTP implementation silently failed in production.
+Resend's free tier is 100 emails/day -- well above strategy_bot's
+once-per-morning daily summary cadence.
 
 Filters by severity AND event_type per config (Sean wants ONE email per
-day, only for daily_summary_email; everything else stays Pushover-only).
-Reads SMTP creds from env via config 'env:VARNAME' resolution.
+day, only for daily_summary_email).
 
 test_mode=true writes the rendered HTML to logs/email_test_<date>.html
-instead of dialing SMTP -- useful during development without spamming
-the inbox.
+instead of dialing the API -- useful during development without
+consuming the free tier quota.
 
 Composes with the bridge: bridge.raise_alert() invokes
 EmailChannel.dispatch(alert, attachments=...) after PushoverDispatcher.
@@ -20,18 +27,16 @@ CLI:
 from __future__ import annotations
 
 import argparse
+import base64
 import logging
+import mimetypes
 import os
-import smtplib
-import socket
 import sys
 from datetime import datetime, timezone
-from email.mime.application import MIMEApplication
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
 from pathlib import Path
 from typing import Any, Callable, List, Optional
 
+import httpx
 import yaml
 
 from . import Alert
@@ -39,7 +44,10 @@ from .email_templates import render_daily_summary_html, render_daily_summary_tex
 
 log = logging.getLogger(__name__)
 
+RESEND_API_URL = "https://api.resend.com/emails"
 DEFAULT_TIMEOUT_SECONDS = 30
+DEFAULT_RESEND_FROM = "onboarding@resend.dev"        # sandbox sender (no DNS needed)
+DEFAULT_RESEND_TO = "seanpcoleman1@gmail.com"        # per CLAUDE.md user email
 
 EVENT_TYPE_SOURCE_PREFIX = "src.alerting.events."
 
@@ -50,6 +58,17 @@ def _event_type_from_source(source: str) -> str:
     if source and source.startswith(EVENT_TYPE_SOURCE_PREFIX):
         return source[len(EVENT_TYPE_SOURCE_PREFIX):]
     return source or ""
+
+
+def _safe_json_or_text(resp) -> Any:
+    """Extract Resend response body for logging without crashing on non-JSON."""
+    try:
+        return resp.json()
+    except Exception:
+        try:
+            return resp.text[:500]
+        except Exception:
+            return None
 
 
 class EmailChannel:
@@ -72,25 +91,37 @@ class EmailChannel:
                 f"alerting config has no 'email' section: {config_path}"
             )
 
-        self._smtp_host = email_cfg.get("smtp_host", "smtp.gmail.com")
-        self._smtp_port = int(email_cfg.get("smtp_port", 587))
-        self._smtp_user = email_cfg.get("smtp_user")
-        self._smtp_password = email_cfg.get("smtp_password")
-        self._test_mode = bool(email_cfg.get("test_mode", False))
-        self._send_for_severities = set(email_cfg.get("send_for_severities") or [])
-        self._send_only_for_event_types = set(email_cfg.get("send_only_for_event_types") or [])
+        provider = email_cfg.get("provider", "resend")
+        if provider != "resend":
+            raise ValueError(
+                f"unsupported email provider: {provider!r} (only 'resend' is supported)"
+            )
 
-        # smtp_to: explicit config wins, else env SMTP_TO, else fall back to smtp_user
-        self._smtp_to = (
-            email_cfg.get("smtp_to")
-            or os.environ.get("SMTP_TO")
-            or self._smtp_user
+        self._api_key = email_cfg.get("resend_api_key")
+        if not self._api_key:
+            raise ValueError(
+                f"email.resend_api_key required (set RESEND_API_KEY env): {config_path}"
+            )
+
+        # from: explicit config wins; else env RESEND_FROM; else sandbox default
+        self._from = (
+            email_cfg.get("resend_from")
+            or os.environ.get("RESEND_FROM")
+            or DEFAULT_RESEND_FROM
+        )
+        # to: explicit config wins; else env RESEND_TO; else legacy SMTP_TO; else default
+        self._to = (
+            email_cfg.get("resend_to")
+            or os.environ.get("RESEND_TO")
+            or os.environ.get("SMTP_TO")  # backward compat from Gmail-SMTP era
+            or DEFAULT_RESEND_TO
         )
 
-        if not self._smtp_user or not self._smtp_password:
-            raise ValueError(
-                f"email.smtp_user and email.smtp_password are required in {config_path}"
-            )
+        self._test_mode = bool(email_cfg.get("test_mode", False))
+        self._send_for_severities = set(email_cfg.get("send_for_severities") or [])
+        self._send_only_for_event_types = set(
+            email_cfg.get("send_only_for_event_types") or []
+        )
 
     # === public API ===
 
@@ -104,7 +135,7 @@ class EmailChannel:
         if reason:
             self._log_event(
                 "alert_email_suppressed",
-                f"email suppressed for {alert.event_type}: {reason}",
+                f"email suppressed for {alert.title!r}: {reason}",
                 {"alert": alert.to_dict(), "reason": reason},
             )
             return False
@@ -121,34 +152,57 @@ class EmailChannel:
             return True
 
         # Build + send
-        attachments = list(attachments or [])
-        msg = self._build_message(alert, attachments)
+        body = self._build_resend_body(alert, list(attachments or []))
 
         try:
-            with smtplib.SMTP(
-                self._smtp_host, self._smtp_port, timeout=DEFAULT_TIMEOUT_SECONDS,
-            ) as server:
-                server.starttls()
-                server.login(self._smtp_user, self._smtp_password)
-                server.send_message(msg)
-            self._log_event(
-                "alert_email_sent",
-                f"email sent to {self._smtp_to}",
-                {"alert": alert.to_dict(), "to": self._smtp_to},
+            resp = httpx.post(
+                RESEND_API_URL,
+                headers={
+                    "Authorization": f"Bearer {self._api_key}",
+                    "Content-Type": "application/json",
+                },
+                json=body,
+                timeout=DEFAULT_TIMEOUT_SECONDS,
             )
-            return True
-        except (smtplib.SMTPException, socket.gaierror, ConnectionError, OSError) as e:
+        except (httpx.HTTPError, OSError) as e:
             self._log_event(
                 "alert_email_failed",
-                f"email send failed: {type(e).__name__}: {e}",
+                f"resend http error: {type(e).__name__}: {e}",
                 {"alert": alert.to_dict(), "error": str(e)},
             )
             return False
 
+        status = getattr(resp, "status_code", None)
+        if status in (200, 202):
+            self._log_event(
+                "alert_email_sent",
+                f"resend ok ({status}) -> {self._to}",
+                {
+                    "alert": alert.to_dict(),
+                    "to": self._to,
+                    "response": _safe_json_or_text(resp),
+                },
+            )
+            return True
+
+        self._log_event(
+            "alert_email_failed",
+            f"resend non-2xx: {status}",
+            {
+                "alert": alert.to_dict(),
+                "status_code": status,
+                "response": _safe_json_or_text(resp),
+            },
+        )
+        return False
+
     # === gates ===
 
     def _should_dispatch(self, alert: Alert) -> Optional[str]:
-        if self._send_for_severities and alert.severity not in self._send_for_severities:
+        if (
+            self._send_for_severities
+            and alert.severity not in self._send_for_severities
+        ):
             return f"severity {alert.severity!r} not in send_for_severities"
         event_type = _event_type_from_source(alert.source)
         if (
@@ -158,21 +212,19 @@ class EmailChannel:
             return f"event_type {event_type!r} not in send_only_for_event_types"
         return None
 
-    # === message construction ===
+    # === Resend body construction ===
 
-    def _build_message(self, alert: Alert, attachments: List[Path]) -> MIMEMultipart:
+    def _build_resend_body(self, alert: Alert, attachments: List[Path]) -> dict:
         date_str = alert.timestamp.strftime("%Y-%m-%d")
-        msg = MIMEMultipart("mixed")
-        msg["Subject"] = f"strategy_bot daily summary — {date_str}"
-        msg["From"] = self._smtp_user
-        msg["To"] = self._smtp_to
+        body: dict = {
+            "from": self._from,
+            "to": [self._to],
+            "subject": f"strategy_bot daily summary — {date_str}",
+            "html": render_daily_summary_html(alert),
+            "text": render_daily_summary_text(alert),
+        }
 
-        # multipart/alternative carries text + html parts
-        alt = MIMEMultipart("alternative")
-        alt.attach(MIMEText(render_daily_summary_text(alert), "plain", "utf-8"))
-        alt.attach(MIMEText(render_daily_summary_html(alert), "html", "utf-8"))
-        msg.attach(alt)
-
+        att_list = []
         for path in attachments:
             if not path.exists():
                 log.warning(f"email attachment not found, skipping: {path}")
@@ -182,11 +234,17 @@ class EmailChannel:
             except Exception as e:
                 log.warning(f"email attachment read failed for {path}: {e}")
                 continue
-            part = MIMEApplication(data, Name=path.name)
-            part["Content-Disposition"] = f'attachment; filename="{path.name}"'
-            msg.attach(part)
+            mime, _ = mimetypes.guess_type(path.name)
+            att_list.append({
+                "filename": path.name,
+                "content": base64.b64encode(data).decode("ascii"),
+                "content_type": mime or "application/octet-stream",
+            })
+        if att_list:
+            body["attachments"] = att_list
+        return body
 
-        return msg
+    # === test_mode helper ===
 
     def _write_test_mode_artifact(self, alert: Alert, html: str) -> Path:
         out_dir = Path(os.environ.get("LOG_DIR", "logs"))
@@ -258,10 +316,10 @@ def cmd_test(args) -> int:
 
 
 def main(argv: Optional[List[str]] = None) -> None:
-    parser = argparse.ArgumentParser(description="Email channel CLI")
+    parser = argparse.ArgumentParser(description="Email channel CLI (Resend)")
     parser.add_argument("--config", type=Path, default=Path("config/alerting.yaml"))
     sub = parser.add_subparsers(dest="cmd", required=True)
-    p_test = sub.add_parser("test", help="send a test daily_summary_email")
+    p_test = sub.add_parser("test", help="send a test daily_summary_email via Resend")
     p_test.set_defaults(func=cmd_test)
     args = parser.parse_args(argv)
     sys.exit(args.func(args))
