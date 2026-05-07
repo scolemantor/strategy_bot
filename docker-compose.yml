@@ -9,7 +9,8 @@ services:
     container_name: strategy_bot
     restart: unless-stopped
     env_file: .env
-    command: python -m src.api.health
+    # Note: command intentionally not set. The Dockerfile ENTRYPOINT runs
+    # entrypoint.sh which orchestrates cron + uvicorn together.
     ports:
       - "8000:8000"
     volumes:

@@ -172,6 +172,8 @@ Required for Phase 7 deployment. iOS app push notifications come later in Phase 
 - `[ ]` Cron schedule (status daily, rebalance weekly, scanners daily)
 - `[ ]` Health check endpoint / dead-man switch
 
+**Container architecture (added 2026-05-07):** The Phase 7 image runs both `cron` (as root, required by Linux) and `uvicorn` (as the `bot` user, for the /api/health endpoint) concurrently inside one container, orchestrated by `entrypoint.sh` under `tini`. Cron jobs use `su bot -c '...'` to drop privileges and inherit env vars that the entrypoint prepends to the crontab (PUSHOVER_*, ALPACA_*, SEC_*, LOG_DIR). One `docker compose up` gives a fully self-contained bot — no host crontab, no manual orchestration.
+
 ### 7a — Pre-live retroactive items
 
 - `[ ]` Fill-status polling (replace quote-based ledger writes)

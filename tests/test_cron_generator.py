@@ -114,9 +114,29 @@ def test_render_crontab_includes_all_jobs(tmp_path):
 def test_render_crontab_wraps_with_timeout_and_log_redirect(tmp_path):
     sched = load_schedule(_write_yaml(tmp_path, VALID_YAML))
     text = render_crontab(sched)
-    assert "logs/cron/scan_all.log 2>&1" in text
-    assert "logs/cron/meta_ranker.log 2>&1" in text
-    assert "timeout 90m bash -c" in text
+    # Container-absolute log paths
+    assert "/app/logs/cron/scan_all.log 2>&1" in text
+    assert "/app/logs/cron/meta_ranker.log 2>&1" in text
+    # Inner timeout + bash wrap still present
+    assert "cd /app && timeout 90m bash -c" in text
+    assert "cd /app && timeout 5m bash -c" in text
+    # Outer su wrap (default user 'bot', no dash so env passes through)
+    assert "su bot -c" in text
+
+
+def test_render_crontab_uses_user_flag(tmp_path):
+    sched = load_schedule(_write_yaml(tmp_path, VALID_YAML))
+    text = render_crontab(sched, user="root")
+    assert "su root -c" in text
+    assert "su bot -c" not in text
+
+
+def test_render_crontab_default_user_is_bot(tmp_path):
+    sched = load_schedule(_write_yaml(tmp_path, VALID_YAML))
+    text = render_crontab(sched)
+    # Drop-to-user comment + every job uses bot
+    assert "Drop-to-user: bot" in text
+    assert "su bot -c" in text
 
 
 def test_render_crontab_sets_tz_and_path(tmp_path):
