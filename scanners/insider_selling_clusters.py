@@ -207,3 +207,34 @@ class InsiderSellingClustersScanner(InsiderBuyingScanner):
                 "Sells are weaker signal than buys — many are routine. Cluster requirement filters most noise.",
             ],
         )
+# --- Phase 4e backtest support ---
+
+def backtest_mode(as_of_date: date, output_dir=None) -> int:
+    """Run insider_selling_clusters scanner as-of a historical date.
+
+    Subclasses InsiderBuyingScanner so it inherits the same Form 4 cache and
+    parser. SEC filings are permanent records — no look-ahead concerns.
+
+    Output goes to <output_dir>/<as_of_date>/insider_selling_clusters.csv.
+    """
+    from pathlib import Path
+
+    output_dir = Path(output_dir) if output_dir else Path("backtest_output")
+    scanner = InsiderSellingClustersScanner()
+
+    try:
+        result = scanner.run(as_of_date)
+    except Exception as e:
+        log.warning(f"insider_selling_clusters backtest_mode failed for {as_of_date}: {e}")
+        return 0
+
+    if result.error or result.candidates.empty:
+        return 0
+
+    date_dir = output_dir / as_of_date.isoformat()
+    date_dir.mkdir(parents=True, exist_ok=True)
+    out_path = date_dir / "insider_selling_clusters.csv"
+    result.candidates.to_csv(out_path, index=False)
+    log.debug(f"  insider_selling_clusters {as_of_date}: wrote {len(result.candidates)} candidates to {out_path}")
+
+    return len(result.candidates)

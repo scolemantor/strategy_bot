@@ -15,13 +15,16 @@ Honest limits:
   - Many breakouts fail. False-positive rate is high.
   - This is idea generation, not signal generation.
   - Survivorship bias: we only see currently-listed names.
+
+Phase 4e backtest support: backtest_mode(as_of_date) replays the same logic
+using only data available as of the given historical date (no look-ahead).
 """
 from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -45,11 +48,8 @@ class Breakout52wScanner(Scanner):
     MIN_VOLUME_RATIO = 1.5
     MIN_BREAKOUT_PCT = 0.005
     MIN_PRICE = 5.0
-    MAX_REASONABLE_BREAKOUT_PCT = 0.50  # >50% almost always = data quality issue
-    MIN_AVG_VOLUME = 10_000  # filter illiquid names where ratios are noise
-    # No truncation — scan the full Alpaca universe.
-    # Previously capped at 5000 which alphabetically truncated to A-HYR,
-    # missing MSFT, NVDA, META, TSLA and every other large-cap past H.
+    MAX_REASONABLE_BREAKOUT_PCT = 0.50
+    MIN_AVG_VOLUME = 10_000
     MAX_UNIVERSE_SIZE = 20000
     BARS_FETCH_DAYS = 400
 
@@ -132,20 +132,17 @@ class Breakout52wScanner(Scanner):
         if prior_high <= 0:
             return None
 
-        # Require the LAST CLOSE to be above prior high — not just an intraday wick.
         if last_close <= prior_high * (1 + self.MIN_BREAKOUT_PCT):
             return None
 
         breakout_pct = (last_close - prior_high) / prior_high
 
-        # Filter implausible breakouts — almost always corrupt data
         if breakout_pct > self.MAX_REASONABLE_BREAKOUT_PCT:
             log.debug(f"Skipping {symbol}: breakout {breakout_pct:.1%} > sanity cap")
             return None
 
         vol_window = df["volume"].iloc[-61:-1]
         avg_volume = float(vol_window.mean()) if len(vol_window) > 0 else 0.0
-        # Floor avg volume — prevents huge ratios from near-zero denominators
         if avg_volume < self.MIN_AVG_VOLUME:
             return None
         volume_ratio = last_volume / avg_volume
@@ -178,3 +175,69 @@ class Breakout52wScanner(Scanner):
                 f"({breakout_pct:.1%} above) on {volume_ratio:.1f}x avg volume"
             ),
         }
+
+
+# --- Phase 4e backtest support ---
+
+def backtest_mode(as_of_date: date, output_dir=None) -> int:
+    """Run scanner as-of a historical date, write candidates to a CSV in the
+    same format the live scanner produces. Returns count of candidates written.
+
+    Uses only data available as-of as_of_date (truncates bars). Output goes to
+    <output_dir>/<as_of_date>/breakout_52w.csv where output_dir defaults to
+    backtest_output/.
+    """
+    from pathlib import Path
+
+    output_dir = Path(output_dir) if output_dir else Path("backtest_output")
+    scanner = Breakout52wScanner()
+
+    try:
+        universe = get_us_equity_universe()
+    except Exception as e:
+        log.warning(f"breakout_52w backtest_mode: universe load failed: {e}")
+        return 0
+
+    if len(universe) > scanner.MAX_UNIVERSE_SIZE:
+        universe = universe[:scanner.MAX_UNIVERSE_SIZE]
+
+    try:
+        creds = load_credentials()
+    except Exception as e:
+        log.warning(f"breakout_52w backtest_mode: credentials failed: {e}")
+        return 0
+
+    start = as_of_date - timedelta(days=scanner.BARS_FETCH_DAYS)
+    end = as_of_date
+
+    try:
+        bars = fetch_bars(universe, start, end, creds, use_cache=True)
+    except Exception as e:
+        log.warning(f"breakout_52w backtest_mode: bars fetch failed: {e}")
+        return 0
+
+    rows = []
+    as_of_ts = pd.Timestamp(as_of_date)
+    for symbol, df in bars.items():
+        try:
+            historical_df = df[df.index <= as_of_ts]
+            if historical_df.empty or len(historical_df) < scanner.LOOKBACK_DAYS_FOR_HIGH:
+                continue
+            analysis = scanner._analyze_symbol(symbol, historical_df, as_of_date)
+            if analysis is not None:
+                rows.append(analysis)
+        except Exception:
+            continue
+
+    if not rows:
+        return 0
+
+    df_out = pd.DataFrame(rows).sort_values("score", ascending=False).reset_index(drop=True)
+
+    date_dir = output_dir / as_of_date.isoformat()
+    date_dir.mkdir(parents=True, exist_ok=True)
+    out_path = date_dir / "breakout_52w.csv"
+    df_out.to_csv(out_path, index=False)
+    log.debug(f"  breakout_52w {as_of_date}: wrote {len(df_out)} candidates to {out_path}")
+
+    return len(df_out)

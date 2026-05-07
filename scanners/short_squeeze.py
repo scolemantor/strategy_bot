@@ -303,3 +303,39 @@ class ShortSqueezeScanner(Scanner):
                 continue
 
         return out
+# --- Phase 4e backtest support ---
+
+def backtest_mode(as_of_date: date, output_dir=None) -> int:
+    """Run short_squeeze scanner as-of a historical date.
+
+    Mostly clean: FINRA settlement files are date-keyed historical records,
+    20-day momentum uses Alpaca cache (already date-aware).
+
+    KNOWN LOOK-AHEAD: yfinance floatShares returns CURRENT float, not historical.
+    For most names this is fine (float changes slowly via secondaries/buybacks),
+    but stocks with major share-count events between as_of_date and today
+    will have inflated/deflated short% calculations. Acceptable for v1.
+
+    Output goes to <output_dir>/<as_of_date>/short_squeeze.csv.
+    """
+    from pathlib import Path
+
+    output_dir = Path(output_dir) if output_dir else Path("backtest_output")
+    scanner = ShortSqueezeScanner()
+
+    try:
+        result = scanner.run(as_of_date)
+    except Exception as e:
+        log.warning(f"short_squeeze backtest_mode failed for {as_of_date}: {e}")
+        return 0
+
+    if result.error or result.candidates.empty:
+        return 0
+
+    date_dir = output_dir / as_of_date.isoformat()
+    date_dir.mkdir(parents=True, exist_ok=True)
+    out_path = date_dir / "short_squeeze.csv"
+    result.candidates.to_csv(out_path, index=False)
+    log.debug(f"  short_squeeze {as_of_date}: wrote {len(result.candidates)} candidates to {out_path}")
+
+    return len(result.candidates)

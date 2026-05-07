@@ -240,3 +240,24 @@ class SmallCapValueScanner(Scanner):
         except Exception as e:
             log.debug(f"  yfinance fundamentals fetch failed for {symbol}: {e}")
             return None
+# --- Phase 4e backtest support ---
+
+def backtest_mode(as_of_date: date, output_dir=None) -> int:
+    """STUB: small_cap_value cannot be cleanly backtested.
+
+    yfinance only returns CURRENT fundamentals (P/E, P/B, EV/EBITDA, FCF,
+    market cap). There is no way to get those values as-of a historical
+    date without a paid fundamentals database (Compustat, etc).
+
+    Using today's fundamentals would produce look-ahead bias — we'd surface
+    tickers that are cheap NOW, not tickers that were cheap on as_of_date.
+
+    For Phase 4e v1 we skip this scanner during backtest. Its weight in
+    scanner_weights.yaml remains judgment-based until we have historical
+    fundamentals access.
+    """
+    log.info(
+        f"small_cap_value backtest_mode: SKIPPED for {as_of_date} "
+        f"(no historical fundamentals available — see scanner docstring)"
+    )
+    return 0

@@ -327,3 +327,174 @@ class ThirteenFChangesScanner(Scanner):
 
         save_cached_13f_filing(accession, holdings)
         return holdings
+# --- Phase 4e backtest support ---
+
+def backtest_mode(as_of_date: date, output_dir=None) -> int:
+    """Run thirteen_f_changes scanner as-of a historical date.
+
+    Look-ahead protection: 13F filings are fetched via SEC submissions API
+    which returns ALL historical filings. We filter to filings with
+    filing_date <= as_of_date so we only see what was actually visible on
+    that historical date.
+
+    Filings have a 45-day SEC reporting delay. So as-of 2024-09-15, the most
+    recent 13F we'd see is for the quarter ending 2024-06-30 (filed Aug 14,
+    2024), and the prior is the quarter ending 2024-03-31 (filed May 15).
+
+    Output goes to <output_dir>/<as_of_date>/thirteen_f_changes.csv.
+    """
+    from pathlib import Path
+
+    output_dir = Path(output_dir) if output_dir else Path("backtest_output")
+    scanner = ThirteenFChangesScanner()
+
+    log.info(f"thirteen_f_changes backtest as-of {as_of_date}: tracking {len(TRACKED_FUNDS)} funds")
+
+    all_changes: List[Dict] = []
+
+    for fund_name, cik in TRACKED_FUNDS.items():
+        try:
+            changes = _process_fund_for_backtest(fund_name, cik, as_of_date, scanner)
+        except Exception as e:
+            log.debug(f"  {fund_name}: error {e}")
+            continue
+
+        if changes:
+            all_changes.extend(changes)
+
+    if not all_changes:
+        return 0
+
+    # Resolve CUSIPs to tickers (cached forever)
+    unique_cusips = list(set(c["cusip"] for c in all_changes if c["cusip"]))
+    cusip_to_ticker = resolve_cusips(unique_cusips)
+
+    rows = []
+    for c in all_changes:
+        ticker = cusip_to_ticker.get(c["cusip"])
+        if not ticker:
+            continue
+
+        value_score = min(100, c["new_value"] / 10_000_000)
+        new_bonus = 30 if c["action"] == "new" else 0
+        pct_bonus = min(20, c.get("pct_increase", 0) * 10) if c["action"] == "add" else 0
+        score = value_score + new_bonus + pct_bonus
+
+        rows.append({
+            "ticker": ticker,
+            "fund_name": c["fund_name"],
+            "action": c["action"],
+            "name_of_issuer": c["name_of_issuer"],
+            "cusip": c["cusip"],
+            "new_value": c["new_value"],
+            "new_shares": c["new_shares"],
+            "prior_shares": c.get("prior_shares", 0),
+            "pct_increase": round(c.get("pct_increase", 0) * 100, 1) if c["action"] == "add" else None,
+            "filing_date": c["filing_date"].isoformat() if c.get("filing_date") else "",
+            "period_of_report": c["period_of_report"].isoformat() if c.get("period_of_report") else "",
+            "score": round(score, 2),
+            "reason": scanner._build_reason(c, ticker),
+        })
+
+    if not rows:
+        return 0
+
+    df_out = pd.DataFrame(rows).sort_values("score", ascending=False).reset_index(drop=True)
+
+    date_dir = output_dir / as_of_date.isoformat()
+    date_dir.mkdir(parents=True, exist_ok=True)
+    out_path = date_dir / "thirteen_f_changes.csv"
+    df_out.to_csv(out_path, index=False)
+    log.debug(f"  thirteen_f_changes {as_of_date}: wrote {len(df_out)} candidates to {out_path}")
+
+    return len(df_out)
+
+
+def _process_fund_for_backtest(fund_name: str, cik: str, as_of_date: date, scanner) -> Optional[List[Dict]]:
+    """Backtest variant of _process_fund. Filters filings to those filed before as_of_date."""
+    filings = load_cached_13f_filings_list(cik)
+    if filings is None:
+        try:
+            filings = fetch_13f_filings_list(cik, limit=20)  # extra limit for historical filtering
+            save_cached_13f_filings_list(cik, filings)
+        except Exception:
+            return None
+
+    # CRITICAL: filter to filings actually visible as-of the historical date
+    filings = [
+        f for f in filings
+        if f["form_type"] == "13F-HR"
+        and f.get("filing_date") is not None
+        and f["filing_date"] <= as_of_date
+    ]
+    if len(filings) < 2:
+        return None
+
+    filings = sorted(filings, key=lambda f: f.get("period_of_report") or date.min, reverse=True)
+    current_filing = filings[0]
+    prior_filing = filings[1]
+
+    current_holdings = scanner._get_holdings(cik, current_filing)
+    prior_holdings = scanner._get_holdings(cik, prior_filing)
+
+    if not current_holdings:
+        return None
+
+    def aggregate_by_cusip(holdings_list):
+        by_cusip = {}
+        for h in holdings_list:
+            c = h["cusip"]
+            if not c:
+                continue
+            if c in by_cusip:
+                by_cusip[c]["shares"] += h["shares"]
+                by_cusip[c]["value_dollars"] += h["value_dollars"]
+            else:
+                by_cusip[c] = dict(h)
+        return list(by_cusip.values())
+
+    current_holdings = aggregate_by_cusip(current_holdings)
+    prior_holdings = aggregate_by_cusip(prior_holdings)
+
+    prior_map = {h["cusip"]: h["shares"] for h in prior_holdings}
+
+    changes = []
+    for h in current_holdings:
+        cusip = h["cusip"]
+        new_shares = h["shares"]
+        new_value = h["value_dollars"]
+
+        if not cusip or new_value < scanner.MIN_NEW_POSITION_VALUE:
+            continue
+
+        prior_shares = prior_map.get(cusip, 0)
+
+        if prior_shares == 0:
+            changes.append({
+                "fund_name": fund_name,
+                "action": "new",
+                "cusip": cusip,
+                "name_of_issuer": h["name_of_issuer"],
+                "new_shares": new_shares,
+                "prior_shares": 0,
+                "new_value": new_value,
+                "filing_date": current_filing["filing_date"],
+                "period_of_report": current_filing["period_of_report"],
+            })
+        elif new_shares > prior_shares:
+            pct_increase = (new_shares - prior_shares) / prior_shares
+            if pct_increase >= scanner.SIGNIFICANT_ADD_PCT and pct_increase <= scanner.MAX_REASONABLE_ADD_PCT:
+                changes.append({
+                    "fund_name": fund_name,
+                    "action": "add",
+                    "cusip": cusip,
+                    "name_of_issuer": h["name_of_issuer"],
+                    "new_shares": new_shares,
+                    "prior_shares": prior_shares,
+                    "new_value": new_value,
+                    "pct_increase": pct_increase,
+                    "filing_date": current_filing["filing_date"],
+                    "period_of_report": current_filing["period_of_report"],
+                })
+
+    return changes

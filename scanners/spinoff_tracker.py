@@ -379,3 +379,35 @@ class SpinoffTrackerScanner(Scanner):
             "accession": accession,
             "filing_index_url": filing_index_url,
         }
+# --- Phase 4e backtest support ---
+
+def backtest_mode(as_of_date: date, output_dir=None) -> int:
+    """Run spinoff_tracker scanner as-of a historical date.
+
+    Iterates SEC daily indexes within lookback window from as_of_date.
+    Daily indexes are immutable historical records — no look-ahead concerns.
+    The parent 8-K search uses as_of_date to bound its lookback window.
+
+    Output goes to <output_dir>/<as_of_date>/spinoff_tracker.csv.
+    """
+    from pathlib import Path
+
+    output_dir = Path(output_dir) if output_dir else Path("backtest_output")
+    scanner = SpinoffTrackerScanner()
+
+    try:
+        result = scanner.run(as_of_date)
+    except Exception as e:
+        log.warning(f"spinoff_tracker backtest_mode failed for {as_of_date}: {e}")
+        return 0
+
+    if result.error or result.candidates.empty:
+        return 0
+
+    date_dir = output_dir / as_of_date.isoformat()
+    date_dir.mkdir(parents=True, exist_ok=True)
+    out_path = date_dir / "spinoff_tracker.csv"
+    result.candidates.to_csv(out_path, index=False)
+    log.debug(f"  spinoff_tracker {as_of_date}: wrote {len(result.candidates)} candidates to {out_path}")
+
+    return len(result.candidates)

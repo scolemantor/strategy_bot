@@ -252,3 +252,35 @@ class SectorRotationScanner(Scanner):
             "3m": (last - ref_3m) / ref_3m,
             "6m": (last - ref_6m) / ref_6m,
         }
+# --- Phase 4e backtest support ---
+
+def backtest_mode(as_of_date: date, output_dir=None) -> int:
+    """Run sector_rotation scanner as-of a historical date.
+
+    Pure price/return data on 12 ETFs (11 sectors + SPY). The live scanner is
+    already date-aware (start=run_date-200d, end=run_date). Bar cache handles
+    historical data. No look-ahead concerns.
+
+    Output goes to <output_dir>/<as_of_date>/sector_rotation.csv.
+    """
+    from pathlib import Path
+
+    output_dir = Path(output_dir) if output_dir else Path("backtest_output")
+    scanner = SectorRotationScanner()
+
+    try:
+        result = scanner.run(as_of_date)
+    except Exception as e:
+        log.warning(f"sector_rotation backtest_mode failed for {as_of_date}: {e}")
+        return 0
+
+    if result.error or result.candidates.empty:
+        return 0
+
+    date_dir = output_dir / as_of_date.isoformat()
+    date_dir.mkdir(parents=True, exist_ok=True)
+    out_path = date_dir / "sector_rotation.csv"
+    result.candidates.to_csv(out_path, index=False)
+    log.debug(f"  sector_rotation {as_of_date}: wrote {len(result.candidates)} candidates to {out_path}")
+
+    return len(result.candidates)

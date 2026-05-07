@@ -286,3 +286,190 @@ class EarningsDriftScanner(Scanner):
                 f"up {post_earnings_pct:.1%} since ({days_since}d ago)"
             ),
         }
+# --- Phase 4e backtest support ---
+
+def backtest_mode(as_of_date: date, output_dir=None) -> int:
+    """Run earnings_drift scanner as-of a historical date.
+
+    Look-ahead protection: yfinance's get_earnings_dates returns the 8 most
+    recent earnings as-of TODAY, which would include reports that occurred
+    AFTER as_of_date. We add an explicit filter so only earnings reports
+    with date < as_of_date are considered.
+
+    The price history fetch is already date-bounded (end=as_of_date+1) in the
+    parent _analyze_symbol logic, so no fix needed there.
+
+    Output goes to <output_dir>/<as_of_date>/earnings_drift.csv.
+    """
+    from pathlib import Path
+    import time
+
+    output_dir = Path(output_dir) if output_dir else Path("backtest_output")
+
+    try:
+        import yfinance as yf
+    except ImportError:
+        log.warning("earnings_drift backtest_mode: yfinance not installed")
+        return 0
+
+    scanner = EarningsDriftScanner()
+
+    try:
+        universe = get_sp500_universe()
+    except Exception as e:
+        log.warning(f"earnings_drift backtest_mode: universe load failed: {e}")
+        return 0
+
+    log.info(f"earnings_drift backtest as-of {as_of_date}: scanning {len(universe)} S&P 500 symbols")
+
+    rows = []
+    cutoff = pd.Timestamp(as_of_date - timedelta(days=scanner.LOOKBACK_DAYS))
+    as_of_ts = pd.Timestamp(as_of_date)
+
+    for i, symbol in enumerate(universe):
+        try:
+            # Fetch earnings WITHOUT cache (cache stores today's view)
+            time.sleep(scanner.REQUEST_DELAY_SEC)
+            try:
+                ticker = yf.Ticker(symbol)
+                earnings = ticker.get_earnings_dates(limit=16)  # extra limit for older filtering
+            except Exception:
+                continue
+
+            if earnings is None or earnings.empty:
+                continue
+
+            try:
+                earnings.index = pd.to_datetime(earnings.index).tz_convert("UTC").tz_localize(None)
+            except (TypeError, AttributeError):
+                try:
+                    earnings.index = pd.to_datetime(earnings.index).tz_localize(None)
+                except Exception:
+                    earnings.index = pd.to_datetime(earnings.index)
+
+            # CRITICAL: filter out earnings that haven't happened yet as-of the historical date
+            earnings = earnings[earnings.index < as_of_ts]
+            if earnings.empty:
+                continue
+
+            # Run the same analysis logic but pass our filtered earnings
+            analysis = _analyze_symbol_for_backtest(yf, symbol, as_of_date, cutoff, earnings, scanner)
+            if analysis is not None:
+                rows.append(analysis)
+        except Exception as e:
+            log.debug(f"  Skipping {symbol}: {e}")
+
+        if (i + 1) % 50 == 0:
+            log.info(f"  Processed {i + 1}/{len(universe)}, {len(rows)} candidates so far")
+
+    if not rows:
+        log.info(f"  No candidates for {as_of_date}")
+        return 0
+
+    df_out = pd.DataFrame(rows).sort_values("score", ascending=False).reset_index(drop=True)
+
+    date_dir = output_dir / as_of_date.isoformat()
+    date_dir.mkdir(parents=True, exist_ok=True)
+    out_path = date_dir / "earnings_drift.csv"
+    df_out.to_csv(out_path, index=False)
+    log.debug(f"  earnings_drift {as_of_date}: wrote {len(df_out)} candidates to {out_path}")
+
+    return len(df_out)
+
+
+def _analyze_symbol_for_backtest(yf, symbol, as_of_date, cutoff, earnings, scanner):
+    """Same logic as EarningsDriftScanner._analyze_symbol but takes pre-filtered
+    earnings DataFrame and uses as_of_date as the run_date."""
+    surprise_col = next(
+        (c for c in ["Surprise(%)", "Surprise (%)", "surprise"] if c in earnings.columns),
+        None,
+    )
+    reported_col = next(
+        (c for c in ["Reported EPS", "EPS Actual", "reported"] if c in earnings.columns),
+        None,
+    )
+    if surprise_col is None or reported_col is None:
+        return None
+
+    recent = earnings[earnings.index >= cutoff].copy()
+    past = recent[recent[reported_col].notna()].copy()
+    if past.empty:
+        return None
+
+    past = past.sort_index(ascending=False)
+    latest = past.iloc[0]
+    latest_date = past.index[0]
+
+    if pd.isna(latest[surprise_col]):
+        return None
+
+    surprise = float(latest[surprise_col])
+    if abs(surprise) > 1:
+        surprise = surprise / 100.0
+
+    if surprise < scanner.MIN_SURPRISE_PCT:
+        return None
+    if surprise > scanner.MAX_REASONABLE_SURPRISE_PCT:
+        return None
+
+    estimate_col = next(
+        (c for c in ["EPS Estimate", "Estimate", "estimate"] if c in earnings.columns),
+        None,
+    )
+    if estimate_col is not None and not pd.isna(latest[estimate_col]):
+        estimate = float(latest[estimate_col])
+        if abs(estimate) < scanner.MIN_ABS_ESTIMATE:
+            return None
+
+    try:
+        ticker = yf.Ticker(symbol)
+        hist = ticker.history(
+            start=(latest_date - pd.Timedelta(days=2)).date(),
+            end=(pd.Timestamp(as_of_date) + pd.Timedelta(days=1)).date(),
+        )
+    except Exception:
+        return None
+
+    if hist is None or hist.empty:
+        return None
+
+    try:
+        if hasattr(hist.index, "tz") and hist.index.tz is not None:
+            hist.index = hist.index.tz_localize(None)
+    except Exception:
+        pass
+
+    latest_date_naive = pd.Timestamp(latest_date).tz_localize(None) if pd.Timestamp(latest_date).tz is not None else pd.Timestamp(latest_date)
+    after = hist[hist.index >= latest_date_naive]
+    if after.empty:
+        return None
+
+    earnings_close = float(after["Close"].iloc[0])
+    current_close = float(hist["Close"].iloc[-1])
+
+    if earnings_close <= 0 or current_close < scanner.MIN_PRICE:
+        return None
+
+    post_earnings_pct = (current_close - earnings_close) / earnings_close
+    if post_earnings_pct < scanner.MIN_POST_EARNINGS_GAIN:
+        return None
+
+    days_since = (pd.Timestamp(as_of_date) - latest_date_naive).days
+
+    freshness = max(0, 1 - days_since / scanner.LOOKBACK_DAYS)
+    score = (surprise * 100) + (post_earnings_pct * 50) + (freshness * 10)
+
+    return {
+        "ticker": symbol,
+        "earnings_date": latest_date_naive.date().isoformat(),
+        "days_since_earnings": days_since,
+        "surprise_pct": round(surprise * 100, 2),
+        "earnings_close": round(earnings_close, 2),
+        "current_close": round(current_close, 2),
+        "post_earnings_pct": round(post_earnings_pct * 100, 2),
+        "score": round(score, 2),
+        "reason": (
+            f"Beat by {surprise:.1%} on {latest_date_naive.date()}, "
+            f"up {post_earnings_pct:.1%} since ({days_since}d ago)"
+        ),
+    }

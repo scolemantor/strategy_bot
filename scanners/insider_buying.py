@@ -1,6 +1,10 @@
 """Insider buying scanner via SEC EDGAR Form 4 filings, with caching.
 
 Defaults to 7-day lookback. Cache makes subsequent runs fast.
+
+Phase 4e backtest support: backtest_mode(as_of_date) replays the same logic
+on a historical date. SEC Form 4 filings are permanent records keyed by
+accession number, so this is just the live scanner pointed at a past date.
 """
 from __future__ import annotations
 
@@ -351,22 +355,18 @@ class InsiderBuyingScanner(Scanner):
                 seen.add(stripped)
                 raw_candidates.append(stripped)
 
-        # Filter out the accession-index metadata XML (no transactions in it)
         non_index = [c for c in raw_candidates if "-index.xml" not in c.lower()]
         if not non_index:
             non_index = raw_candidates
 
-        # Prefer files named like Form 4 docs (form4.xml, wf-form4.xml, etc.)
         form4_named = [c for c in non_index if "form4" in c.lower()]
         xml_path = form4_named[0] if form4_named else non_index[0]
 
-        # Build absolute URL: handle both absolute and relative paths
         if xml_path.startswith("http"):
             xml_url = xml_path
         elif xml_path.startswith("/"):
             xml_url = EDGAR_BASE + xml_path
         else:
-            # Relative path — resolve against the filing index URL
             base = filing["filing_index_url"].rsplit("/", 1)[0]
             xml_url = base + "/" + xml_path
 
@@ -445,3 +445,38 @@ class InsiderBuyingScanner(Scanner):
             ))
 
         return out
+
+
+# --- Phase 4e backtest support ---
+
+def backtest_mode(as_of_date: date, output_dir=None) -> int:
+    """Run insider_buying scanner as-of a historical date.
+
+    SEC Form 4 filings are permanent records keyed by accession number, and
+    the scanner only looks back N days from as_of_date. So this is just the
+    live scanner pointed at a historical date — no look-ahead concerns.
+
+    Output goes to <output_dir>/<as_of_date>/insider_buying.csv where
+    output_dir defaults to backtest_output/.
+    """
+    from pathlib import Path
+
+    output_dir = Path(output_dir) if output_dir else Path("backtest_output")
+    scanner = InsiderBuyingScanner()
+
+    try:
+        result = scanner.run(as_of_date)
+    except Exception as e:
+        log.warning(f"insider_buying backtest_mode failed for {as_of_date}: {e}")
+        return 0
+
+    if result.error or result.candidates.empty:
+        return 0
+
+    date_dir = output_dir / as_of_date.isoformat()
+    date_dir.mkdir(parents=True, exist_ok=True)
+    out_path = date_dir / "insider_buying.csv"
+    result.candidates.to_csv(out_path, index=False)
+    log.debug(f"  insider_buying {as_of_date}: wrote {len(result.candidates)} candidates to {out_path}")
+
+    return len(result.candidates)
