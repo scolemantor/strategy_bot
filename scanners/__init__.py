@@ -1,10 +1,15 @@
-"""Registry of all scanners. Add new ones here as they're built."""
+"""Registry of all scanners. Add new ones here as they're built.
+
+Currently 14 scanners registered (#18 congressional_trades activated
+2026-05-08; #14-17 paid-data scanners still deferred per Phase 4g).
+"""
 from __future__ import annotations
 
 from typing import Dict, Type
 
 from .base import Scanner
 from .breakout_52w import Breakout52wScanner
+from .congressional_trades import CongressionalTradesScanner
 from .earnings_calendar import EarningsCalendarScanner
 from .earnings_drift import EarningsDriftScanner
 from .fda_calendar import FdaCalendarScanner
@@ -32,11 +37,14 @@ SCANNERS: Dict[str, Type[Scanner]] = {
     "macro_calendar": MacroCalendarScanner,
     "ipo_lockup": IpoLockupScanner,
     "insider_selling_clusters": InsiderSellingClustersScanner,
+    "congressional_trades": CongressionalTradesScanner,
 }
 
 # Scanners temporarily skipped during `scan.py all` but still available
 # via `scan.py run NAME`. Add a comment with reason + date when disabling.
-DISABLED_IN_SCAN_ALL: set[str] = set()
+DISABLED_IN_SCAN_ALL: set[str] = {
+    "congressional_trades",  # 2026-05-08: newly activated; pending standalone validation runs
+}
 
 
 def get_scanner(name: str) -> Scanner:

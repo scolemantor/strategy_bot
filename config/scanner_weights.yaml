@@ -82,3 +82,7 @@ scanners:
     direction: bearish
     category: conviction
     weight: 1.2  # mirror of #1's weight
+  congressional_trades:
+    direction: bullish
+    category: conviction
+    weight: 1.0  # starts conservative; raise toward 1.1-1.2 after live signal validates

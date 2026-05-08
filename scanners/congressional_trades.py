@@ -36,10 +36,11 @@ Honest limits:
   - Upstream feed schemas are unstable; the parsers may need maintenance
     when fields are renamed or restructured.
 
-Phase 4a scanner #18. NOT YET ACTIVATED -- not in scan.py, not in
-config/scanner_weights.yaml. Build per PROJECT_STATE.md sequencing: enable
-after Phase 4e finishes. When activated, target weight is 1.1 in the
-meta-ranker (between insider_buying 1.2 and thirteen_f_changes 1.3).
+Phase 4a scanner #18. Activated 2026-05-08. Registered in
+scanners/__init__.py with weight 1.0 in config/scanner_weights.yaml
+(starts conservative; tune up after live data validates the signal).
+Currently in DISABLED_IN_SCAN_ALL pending standalone validation runs
+via `python scan.py run congressional_trades`.
 """
 from __future__ import annotations
 

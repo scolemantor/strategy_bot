@@ -69,3 +69,8 @@ scanners:
   # Insider selling clusters — same universe as #1; loose
   insider_selling_clusters:
     tier: loose
+
+  # Congressional trades — STOCK Act disclosures from House + Senate
+  # Same large-cap-friendly universe assumption as 13F; loose default fits
+  congressional_trades:
+    tier: loose
