@@ -1,0 +1,12 @@
+# Insider buying scanner configuration.
+#
+# Tunable thresholds. Defaults match scanners/insider_buying.py inline class
+# constants — this file is an override layer, so deleting it falls back
+# to those.
+#
+# min_per_txn_value_usd: per-transaction floor for purchases. Drops sub-$10k
+#   buys (typical ESPP synchronized purchases run $5k-$10k). Lower this to
+#   $5000 to disable Layer 1 ESPP filtering. Env var override:
+#   INSIDER_MIN_PER_TXN_VALUE.
+
+min_per_txn_value_usd: 10000

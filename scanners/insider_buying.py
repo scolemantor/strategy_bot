@@ -5,6 +5,16 @@ Defaults to 7-day lookback. Cache makes subsequent runs fast.
 Phase 4e backtest support: backtest_mode(as_of_date) replays the same logic
 on a historical date. SEC Form 4 filings are permanent records keyed by
 accession number, so this is just the live scanner pointed at a past date.
+
+ESPP filter (Phase 7): three layers exclude routine Employee Stock Purchase
+Plan transactions which would otherwise look like cluster buys.
+  - Layer 1 (per-txn floor): drop transactions below
+    `min_per_txn_value_usd` (default $10k; configurable via
+    config/insider_buying.yaml or env INSIDER_MIN_PER_TXN_VALUE).
+  - Layer 2 (footnote ESPP detection): drop transactions whose Form 4
+    footnote text matches ESPP_FOOTNOTE_PATTERN.
+  - Layer 3 (cluster heuristic): drop clusters where all transactions
+    occur on a single date AND >=50% are sub-$25k.
 """
 from __future__ import annotations
 
@@ -12,12 +22,14 @@ import logging
 import os
 import re
 from collections import defaultdict
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
 from datetime import date, datetime, timedelta
+from pathlib import Path
 from typing import Dict, List, Optional
 
 import pandas as pd
 import requests
+import yaml
 from lxml import etree
 
 from .base import Scanner, ScanResult, empty_result
@@ -51,6 +63,62 @@ ROW_REGEX = re.compile(
     r"\s*$"
 )
 
+# Form 4 footnote keywords that indicate an ESPP / employee stock purchase
+# plan transaction (not real insider conviction). Case-insensitive. Used by
+# Layer 2 of the ESPP filter.
+ESPP_FOOTNOTE_PATTERN = re.compile(
+    r"(ESPP|Employee Stock Purchase Plan|stock purchase plan|"
+    r"purchased pursuant to a stock purchase plan|ESPP transaction)",
+    re.IGNORECASE,
+)
+
+CONFIG_PATH = Path(__file__).resolve().parent.parent / "config" / "insider_buying.yaml"
+
+
+def _load_config() -> dict:
+    """Load config/insider_buying.yaml. Missing file = empty dict (use class defaults)."""
+    if not CONFIG_PATH.exists():
+        return {}
+    try:
+        with open(CONFIG_PATH) as f:
+            return yaml.safe_load(f) or {}
+    except Exception as e:
+        log.warning(f"Failed to load {CONFIG_PATH}: {e}; using class defaults")
+        return {}
+
+
+def _build_rejection_rows(
+    rejected_txns: List["Form4Transaction"],
+    reason: str,
+    ticker_map: Dict[str, str],
+    min_cluster_insiders: int,
+) -> List[dict]:
+    """Aggregate rejected transactions by issuer; emit a rejection row per
+    issuer that *would* have qualified as a cluster (>= min_cluster_insiders
+    distinct insiders). Quiet on small dribbles to keep rejected.csv signal-rich."""
+    by_issuer: Dict[str, List["Form4Transaction"]] = defaultdict(list)
+    for t in rejected_txns:
+        by_issuer[t.issuer_cik].append(t)
+
+    rows = []
+    for cik, ts in by_issuer.items():
+        distinct = {t.insider_cik for t in ts}
+        if len(distinct) < min_cluster_insiders:
+            continue
+        ticker = cik_to_ticker(cik, ticker_map)
+        if ticker is None:
+            continue
+        rows.append({
+            "ticker": ticker,
+            "issuer_name": ts[0].issuer_name,
+            "issuer_cik": cik,
+            "rejection_reason": reason,
+            "insider_count": len(distinct),
+            "buy_count": len(ts),
+            "total_value_usd": round(sum(t.value_usd for t in ts), 2),
+        })
+    return rows
+
 
 @dataclass
 class Form4Transaction:
@@ -66,6 +134,10 @@ class Form4Transaction:
     shares: float
     price_per_share: float
     accession: str
+    # Concatenated text from Form 4 <footnote> elements referenced by this
+    # transaction. Default "" so old cache entries (pre-Phase-7) deserialize
+    # cleanly without footnote data; ESPP Layer 2 simply won't fire on them.
+    footnote_text: str = ""
 
     @property
     def value_usd(self) -> float:
@@ -98,7 +170,10 @@ class InsiderBuyingScanner(Scanner):
 
     DEFAULT_LOOKBACK_DAYS = 7
     MIN_CLUSTER_INSIDERS = 2
-    MIN_TRANSACTION_VALUE_USD = 5_000
+    MIN_TRANSACTION_VALUE_USD = 5_000             # legacy hard floor for any purchase
+    MIN_PER_TXN_VALUE_USD = 10_000                # ESPP Layer 1 floor; YAML/env overridable
+    ESPP_HEURISTIC_VALUE_THRESHOLD = 25_000       # ESPP Layer 3 sub-threshold
+    ESPP_HEURISTIC_RATIO = 0.5                    # ESPP Layer 3 ratio
 
     def __init__(self, lookback_days: Optional[int] = None):
         super().__init__()
@@ -112,6 +187,21 @@ class InsiderBuyingScanner(Scanner):
                 self.lookback_days = self.DEFAULT_LOOKBACK_DAYS
         else:
             self.lookback_days = self.DEFAULT_LOOKBACK_DAYS
+
+        # Layer 1 floor: env > yaml > class default
+        config = _load_config()
+        env_floor = os.getenv("INSIDER_MIN_PER_TXN_VALUE")
+        if env_floor is not None:
+            try:
+                self.min_per_txn_value_usd = int(env_floor)
+            except ValueError:
+                self.min_per_txn_value_usd = int(
+                    config.get("min_per_txn_value_usd", self.MIN_PER_TXN_VALUE_USD)
+                )
+        else:
+            self.min_per_txn_value_usd = int(
+                config.get("min_per_txn_value_usd", self.MIN_PER_TXN_VALUE_USD)
+            )
 
     def run(self, run_date: date) -> ScanResult:
         log.info(f"Lookback window: {self.lookback_days} days")
@@ -156,10 +246,44 @@ class InsiderBuyingScanner(Scanner):
             and t.price_per_share > 0
             and t.value_usd >= self.MIN_TRANSACTION_VALUE_USD
         ]
-        log.info(f"Filtered to {len(purchases)} open-market purchases")
+        log.info(f"Filtered to {len(purchases)} open-market purchases (>=${self.MIN_TRANSACTION_VALUE_USD:,})")
+
+        rejected_rows: List[dict] = []
+
+        # ESPP Layer 2: footnote pattern. Drop transactions whose Form 4
+        # footnote text matches the ESPP regex.
+        espp_footnote_rejected = [
+            t for t in purchases if t.footnote_text and ESPP_FOOTNOTE_PATTERN.search(t.footnote_text)
+        ]
+        purchases = [
+            t for t in purchases if not (t.footnote_text and ESPP_FOOTNOTE_PATTERN.search(t.footnote_text))
+        ]
+        if espp_footnote_rejected:
+            log.info(f"  Layer 2 (ESPP footnote): {len(espp_footnote_rejected)} txns dropped")
+        rejected_rows.extend(
+            _build_rejection_rows(
+                espp_footnote_rejected, "ESPP footnote", ticker_map, self.MIN_CLUSTER_INSIDERS,
+            )
+        )
+
+        # ESPP Layer 1: per-txn floor (configurable via YAML / env).
+        sub_floor_rejected = [t for t in purchases if t.value_usd < self.min_per_txn_value_usd]
+        purchases = [t for t in purchases if t.value_usd >= self.min_per_txn_value_usd]
+        if sub_floor_rejected:
+            log.info(f"  Layer 1 (per-txn floor ${self.min_per_txn_value_usd:,}): {len(sub_floor_rejected)} txns dropped")
+        rejected_rows.extend(
+            _build_rejection_rows(
+                sub_floor_rejected,
+                f"sub-${self.min_per_txn_value_usd // 1000}k transactions",
+                ticker_map,
+                self.MIN_CLUSTER_INSIDERS,
+            )
+        )
+
+        log.info(f"  After ESPP Layers 1+2: {len(purchases)} purchases remain")
 
         if not purchases:
-            return empty_result(self.name, run_date)
+            return self._finalize_empty(run_date, filings, rejected_rows)
 
         by_issuer: Dict[str, List[Form4Transaction]] = defaultdict(list)
         for t in purchases:
@@ -173,6 +297,28 @@ class InsiderBuyingScanner(Scanner):
 
             ticker = cik_to_ticker(issuer_cik, ticker_map)
             if ticker is None:
+                continue
+
+            # ESPP Layer 3: cluster heuristic. All same date + >=50% sub-$25k = ESPP-shaped.
+            distinct_dates = {t.transaction_date for t in txns if t.transaction_date is not None}
+            n_under_threshold = sum(1 for t in txns if t.value_usd < self.ESPP_HEURISTIC_VALUE_THRESHOLD)
+            ratio_under = n_under_threshold / len(txns) if txns else 0
+            if len(distinct_dates) == 1 and ratio_under >= self.ESPP_HEURISTIC_RATIO:
+                cluster_date = next(iter(distinct_dates))
+                log.info(
+                    f"  Layer 3: dropping {ticker} cluster ({len(txns)} txns, all on {cluster_date}, "
+                    f"{n_under_threshold} sub-${self.ESPP_HEURISTIC_VALUE_THRESHOLD//1000}k) — likely ESPP"
+                )
+                rejected_rows.append({
+                    "ticker": ticker,
+                    "issuer_name": txns[0].issuer_name,
+                    "issuer_cik": issuer_cik,
+                    "rejection_reason": "ESPP heuristic (same-date + sub-$25k)",
+                    "insider_count": len(distinct_insiders),
+                    "buy_count": len(txns),
+                    "total_value_usd": round(sum(t.value_usd for t in txns), 2),
+                    "cluster_date": cluster_date.isoformat(),
+                })
                 continue
 
             issuer_name = txns[0].issuer_name
@@ -199,20 +345,49 @@ class InsiderBuyingScanner(Scanner):
                 ),
             })
 
+        rejected_df = pd.DataFrame(rejected_rows) if rejected_rows else None
+
         if not rows:
-            return empty_result(self.name, run_date)
+            return ScanResult(
+                scanner_name=self.name,
+                run_date=run_date,
+                candidates=pd.DataFrame(columns=["ticker", "score", "reason"]),
+                rejected_candidates=rejected_df,
+                notes=[
+                    f"Lookback: {self.lookback_days} days",
+                    f"Filings parsed: {len(filings)}",
+                    f"Purchases after ESPP filter: {len(purchases)}",
+                    f"ESPP-rejected rows: {len(rejected_rows)}",
+                ],
+            )
 
         df = pd.DataFrame(rows).sort_values("score", ascending=False).reset_index(drop=True)
         return ScanResult(
             scanner_name=self.name,
             run_date=run_date,
             candidates=df,
+            rejected_candidates=rejected_df,
             notes=[
                 f"Lookback: {self.lookback_days} days",
                 f"Filings parsed: {len(filings)}",
-                f"Purchases extracted: {len(purchases)}",
+                f"Purchases after ESPP filter: {len(purchases)}",
                 f"Distinct issuers w/ buys: {len(by_issuer)}",
                 f"Clusters (>= {self.MIN_CLUSTER_INSIDERS} insiders): {len(rows)}",
+                f"ESPP-rejected rows: {len(rejected_rows)}",
+            ],
+        )
+
+    def _finalize_empty(self, run_date: date, filings: list, rejected_rows: list) -> ScanResult:
+        rejected_df = pd.DataFrame(rejected_rows) if rejected_rows else None
+        return ScanResult(
+            scanner_name=self.name,
+            run_date=run_date,
+            candidates=pd.DataFrame(columns=["ticker", "score", "reason"]),
+            rejected_candidates=rejected_df,
+            notes=[
+                f"Lookback: {self.lookback_days} days",
+                f"Filings parsed: {len(filings)}",
+                f"ESPP-rejected rows: {len(rejected_rows)}",
             ],
         )
 
@@ -408,6 +583,14 @@ class InsiderBuyingScanner(Scanner):
             return []
         insider_cik = insider_cik.zfill(10)
 
+        # Build footnote_id -> text map. <footnotes><footnote id="F1">...</footnote></footnotes>
+        # Per-transaction <footnoteId id="F1"/> refs resolve to this text via Layer 2.
+        footnote_map: Dict[str, str] = {}
+        for fn in root.findall("footnotes/footnote"):
+            fid = fn.get("id", "")
+            if fid:
+                footnote_map[fid] = (fn.text or "").strip()
+
         out: List[Form4Transaction] = []
         for txn in root.findall("nonDerivativeTable/nonDerivativeTransaction"):
             txn_code = find_text(txn, "transactionCoding/transactionCode") or ""
@@ -429,6 +612,18 @@ class InsiderBuyingScanner(Scanner):
                 except ValueError:
                     pass
 
+            # Resolve footnoteId refs anywhere in the transaction subtree.
+            fn_refs: List[str] = []
+            for el in txn.iter():
+                local = etree.QName(el).localname
+                if local == "footnoteId":
+                    fid = el.get("id", "")
+                    if fid:
+                        fn_refs.append(fid)
+            footnote_text = " | ".join(
+                footnote_map.get(f, "") for f in fn_refs if f in footnote_map
+            ).strip()
+
             out.append(Form4Transaction(
                 issuer_cik=issuer_cik,
                 issuer_name=issuer_name,
@@ -442,6 +637,7 @@ class InsiderBuyingScanner(Scanner):
                 shares=shares,
                 price_per_share=price,
                 accession=filing_meta.get("accession", ""),
+                footnote_text=footnote_text,
             ))
 
         return out

@@ -20,6 +20,8 @@ import traceback
 from datetime import date
 from pathlib import Path
 
+import pandas as pd
+
 from scanners import DISABLED_IN_SCAN_ALL, SCANNERS, get_scanner, list_scanners
 from scanners.base import save_result
 from scanners.investability import filter_candidates
@@ -91,6 +93,14 @@ def cmd_run(name: str, run_date: date, output_dir: Path, apply_filter: bool = Tr
     if result.count == 0:
         return {"count": 0, "errors": 0, "runtime_seconds": runtime}
 
+    rejection_dfs = []
+
+    # Scanner-level rejections (e.g. ESPP filter on insider_buying)
+    if result.rejected_candidates is not None and not result.rejected_candidates.empty:
+        scanner_rej = result.rejected_candidates.copy()
+        scanner_rej["source"] = "scanner"
+        rejection_dfs.append(scanner_rej)
+
     if apply_filter:
         try:
             approved_df, rejected_df = filter_candidates(
@@ -100,9 +110,15 @@ def cmd_run(name: str, run_date: date, output_dir: Path, apply_filter: bool = Tr
             log.info(f"  Investability filter: {len(approved_df)} approved, {len(rejected_df)} rejected")
             result.candidates = approved_df
             if not rejected_df.empty:
-                _save_rejected(rejected_df, name, run_date, output_dir)
+                inv_rej = rejected_df.copy()
+                inv_rej["source"] = "investability"
+                rejection_dfs.append(inv_rej)
         except Exception as e:
             log.exception(f"  Investability filter failed: {e}; passing through unfiltered")
+
+    if rejection_dfs:
+        combined_rej = pd.concat(rejection_dfs, ignore_index=True, sort=False)
+        _save_rejected(combined_rej, name, run_date, output_dir)
 
     if not result.candidates.empty:
         path = save_result(result, output_dir)

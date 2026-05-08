@@ -29,6 +29,7 @@ class ScanResult:
     candidates: pd.DataFrame
     error: Optional[str] = None
     notes: List[str] = field(default_factory=list)
+    rejected_candidates: Optional[pd.DataFrame] = None
 
     @property
     def count(self) -> int:
