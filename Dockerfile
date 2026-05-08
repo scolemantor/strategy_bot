@@ -6,11 +6,8 @@
 # --- Stage 1: frontend build ---
 FROM node:20-alpine AS frontend-build
 WORKDIR /build
-COPY dashboard/web/package.json ./
-# package-lock.json is intentionally NOT shipped — we use `npm install` so
-# the lockfile is generated on first build. To re-pin, run `npm install`
-# locally and commit the lockfile, then switch to `npm ci`.
-RUN npm install --no-audit --no-fund --omit=optional
+COPY dashboard/web/package.json dashboard/web/package-lock.json ./
+RUN npm ci --no-audit --no-fund --omit=optional
 COPY dashboard/web/ ./
 RUN npm run build
 
