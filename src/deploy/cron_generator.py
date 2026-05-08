@@ -1,7 +1,11 @@
 """Generate a crontab from config/cron_schedule.yaml.
 
-Wraps each command with `timeout Nm bash -c '<cmd> >> logs/cron/<name>.log 2>&1'`
-so jobs that hang get killed and per-job logs land in logs/cron/.
+Two job shapes supported:
+  - single-step: job has `command`. Wrapped with timeout + per-job log file.
+  - chained pipeline: job has `steps: [{name, command}, ...]`. Each step
+    logs to its own logs/cron/<step_name>.log and is joined with `&&` so
+    a failed step short-circuits the rest of the pipeline. The job-level
+    `timeout_minutes` bounds the total pipeline duration.
 
 CLI:
   python -m src.deploy.cron_generator                      # to stdout
@@ -44,9 +48,29 @@ def validate_schedule(schedule: dict) -> List[str]:
         errors.append("no jobs defined")
     seen_names = set()
     for i, job in enumerate(jobs):
-        for k in ("name", "schedule", "command", "timeout_minutes"):
+        for k in ("name", "schedule", "timeout_minutes"):
             if k not in job:
                 errors.append(f"job[{i}] missing required key: {k}")
+        # Exactly one of `command` or `steps` must be present.
+        has_command = "command" in job
+        has_steps = "steps" in job
+        if has_command and has_steps:
+            errors.append(f"job[{i}]: must have either 'command' or 'steps', not both")
+        elif not has_command and not has_steps:
+            errors.append(f"job[{i}]: must have either 'command' or 'steps'")
+        if has_steps:
+            steps = job.get("steps") or []
+            if not isinstance(steps, list) or not steps:
+                errors.append(f"job[{i}]: 'steps' must be a non-empty list")
+            else:
+                for j, step in enumerate(steps):
+                    if not isinstance(step, dict):
+                        errors.append(f"job[{i}].steps[{j}]: must be a mapping")
+                        continue
+                    if "name" not in step or "command" not in step:
+                        errors.append(
+                            f"job[{i}].steps[{j}]: missing required key 'name' or 'command'"
+                        )
         name = job.get("name")
         if name in seen_names:
             errors.append(f"duplicate job name: {name}")
@@ -89,21 +113,30 @@ def render_crontab(schedule: dict, user: str = DEFAULT_USER) -> str:
     for job in jobs:
         name = job["name"]
         sched = job["schedule"]
-        cmd = job["command"]
         timeout_m = int(job["timeout_minutes"])
         desc = job.get("description", "")
 
         if desc:
             lines.append(f"# {name}: {desc}")
-        log_path = f"{LOG_DIR_ABSOLUTE}/{name}.log"
-        # Inner command (single-quoted from cron's perspective via the su wrap):
-        #   cd /app && timeout Nm bash -c "<user_cmd> >> <log> 2>&1"
-        # The double quotes around the bash -c arg let the outer bash (started
-        # by su) evaluate $(date +%F) before passing to timeout.
-        inner = (
-            f"cd /app && timeout {timeout_m}m bash -c "
-            f'"{cmd} >> {log_path} 2>&1"'
-        )
+
+        # Chained pipeline (`steps`) vs single-step (`command`). For chained,
+        # each step writes to its own log and is joined with &&, so a failed
+        # step short-circuits the rest. The job-level timeout bounds the
+        # total pipeline duration.
+        if "steps" in job:
+            step_chunks: List[str] = []
+            for step in job["steps"]:
+                step_log = f"{LOG_DIR_ABSOLUTE}/{step['name']}.log"
+                step_chunks.append(f"{step['command']} >> {step_log} 2>&1")
+            inner_cmd = " && ".join(step_chunks)
+        else:
+            log_path = f"{LOG_DIR_ABSOLUTE}/{name}.log"
+            inner_cmd = f"{job['command']} >> {log_path} 2>&1"
+
+        # Outer wrapping: cd /app && timeout Nm bash -c "<inner>".
+        # Double quotes around the bash -c arg let the outer bash (started
+        # by su) evaluate $(date +%F) before invoking timeout.
+        inner = f'cd /app && timeout {timeout_m}m bash -c "{inner_cmd}"'
         wrapped = f"su {user} -c '{_escape_single_quotes(inner)}'"
         lines.append(f"{sched} {wrapped}")
         lines.append("")
