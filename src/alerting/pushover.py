@@ -59,10 +59,17 @@ class PushoverDispatcher:
         config_path: Path = Path("config/alerting.yaml"),
         logger: Optional[Any] = None,
         clock: Optional[Callable[[], datetime]] = None,
+        notifications_writer: Optional[Callable[[str, str, dict], None]] = None,
     ):
         self._config_path = Path(config_path)
         self._logger = logger
         self._clock = clock or (lambda: datetime.now(timezone.utc))
+        # Phase 7.5: optional in-process callback. Dashboard registers this
+        # at FastAPI startup so dashboard-initiated alerts go straight to
+        # the notifications table. Cron-only callers leave it as None and
+        # stay DB-free; their alerts land in DB via the JSONL backfill +
+        # incremental sync paths in dashboard/api/jsonl_backfill.py.
+        self._notifications_writer = notifications_writer
 
         raw_config = self._load_config(self._config_path)
         config = self._resolve_env_refs(raw_config)
@@ -235,12 +242,16 @@ class PushoverDispatcher:
     # === logging helpers ===
 
     def _log_event(self, event_type: str, message: str, payload: dict) -> None:
-        if self._logger is None:
-            return
-        try:
-            self._logger.log(event_type, message, level="INFO", payload=payload)
-        except Exception:
-            pass
+        if self._logger is not None:
+            try:
+                self._logger.log(event_type, message, level="INFO", payload=payload)
+            except Exception:
+                pass
+        if self._notifications_writer is not None:
+            try:
+                self._notifications_writer(event_type, message, payload)
+            except Exception:
+                pass  # never let DB write break alerting
 
     def _log_suppressed(self, alert: Alert, reason: str) -> None:
         self._log_event(

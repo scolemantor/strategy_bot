@@ -23,8 +23,10 @@ from fastapi.staticfiles import StaticFiles
 
 from dashboard.api.auth import require_jwt_secret
 from dashboard.api.db import get_sessionmaker
+from dashboard.api.jsonl_backfill import backfill_if_empty
 from dashboard.api.routes import auth as auth_routes
 from dashboard.api.routes import history as history_routes
+from dashboard.api.routes import notifications as notifications_routes
 from dashboard.api.routes import ticker as ticker_routes
 from dashboard.api.routes import today as today_routes
 from dashboard.api.routes import watchlist as watchlist_routes
@@ -45,6 +47,7 @@ async def lifespan(app: FastAPI):
     db = SessionLocal()
     try:
         seed_user_if_empty(db)
+        backfill_if_empty(db)
     finally:
         db.close()
     yield
@@ -64,6 +67,7 @@ app.include_router(today_routes.router)
 app.include_router(watchlist_routes.router)
 app.include_router(ticker_routes.router)
 app.include_router(history_routes.router)
+app.include_router(notifications_routes.router)
 
 
 # Static SPA — only mounted in production where /app/dashboard/web/dist
