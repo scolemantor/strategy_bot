@@ -24,6 +24,8 @@ from fastapi.staticfiles import StaticFiles
 from dashboard.api.auth import require_jwt_secret
 from dashboard.api.db import get_sessionmaker
 from dashboard.api.routes import auth as auth_routes
+from dashboard.api.routes import today as today_routes
+from dashboard.api.routes import watchlist as watchlist_routes
 from dashboard.api.seed import seed_user_if_empty
 
 log = logging.getLogger(__name__)
@@ -56,6 +58,8 @@ app.add_api_route("/api/health/ready", ready_route, methods=["GET"])
 # Auth router (login is unauthenticated; logout/me handle auth themselves
 # via the current_user dependency).
 app.include_router(auth_routes.router)
+app.include_router(today_routes.router)
+app.include_router(watchlist_routes.router)
 
 
 # Static SPA — only mounted in production where /app/dashboard/web/dist

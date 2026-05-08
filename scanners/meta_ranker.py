@@ -363,7 +363,81 @@ def aggregate(
 
     _emit_alerts(run_date, scanner_summary, master_df, conflicts_df)
 
+    # Phase 7.5 commit 3: per-ticker reverse index for dashboard ticker-detail
+    # page. One JSON file per ticker under data_cache/ticker_index/, holding
+    # the last 30 days of master_ranked appearances. Avoids the 30-days *
+    # 14-scanners file-read cost on every page load.
+    try:
+        _write_ticker_reverse_index(run_date, master_df)
+    except Exception as e:
+        log.warning(f"  ticker_index write failed (non-fatal): {e}")
+
     return master_df, conflicts_df, summary_df
+
+
+def _write_ticker_reverse_index(
+    run_date: date, master_df: pd.DataFrame, retention_days: int = 30,
+) -> None:
+    """For each ticker in master_df, upsert today's entry into
+    data_cache/ticker_index/<TICKER>.json and prune entries older than
+    retention_days. Single read/write per affected ticker.
+
+    File schema:
+      {"ticker": "AAPL",
+       "history": [
+         {"date": "2026-05-08", "scanners": [...], "composite_score": 2.4,
+          "n_categories": 2, "directions": "bullish", "is_conflict": false}
+       ]}
+    """
+    import json
+    from datetime import timedelta as _td
+
+    if master_df is None or master_df.empty:
+        return
+
+    index_dir = Path("data_cache/ticker_index")
+    index_dir.mkdir(parents=True, exist_ok=True)
+    cutoff = run_date - _td(days=retention_days)
+    today_iso = run_date.isoformat()
+
+    for _, row in master_df.iterrows():
+        ticker = str(row.get("ticker", "")).strip().upper()
+        if not ticker or ticker == "?":
+            continue
+
+        path = index_dir / f"{ticker}.json"
+        existing = {"ticker": ticker, "history": []}
+        if path.exists():
+            try:
+                existing = json.loads(path.read_text(encoding="utf-8"))
+            except Exception:
+                existing = {"ticker": ticker, "history": []}
+
+        history = [h for h in existing.get("history", []) if h.get("date") != today_iso]
+
+        # Prune older than cutoff
+        def _keep(h: dict) -> bool:
+            try:
+                return date.fromisoformat(h.get("date", "")) >= cutoff
+            except Exception:
+                return False
+        history = [h for h in history if _keep(h)]
+
+        scanners = [s.strip() for s in str(row.get("scanners_hit", "")).split(",") if s.strip()]
+        history.append({
+            "date": today_iso,
+            "scanners": scanners,
+            "composite_score": float(row.get("composite_score", 0.0) or 0.0),
+            "n_categories": int(row.get("n_categories", 0) or 0),
+            "directions": str(row.get("directions", "")),
+            "is_conflict": bool(row.get("is_conflict", False)),
+        })
+        history.sort(key=lambda h: h.get("date", ""), reverse=True)
+
+        path.write_text(
+            json.dumps({"ticker": ticker, "history": history}, indent=None),
+            encoding="utf-8",
+        )
 
 
 def _emit_alerts(run_date, scanner_summary, master_df, conflicts_df) -> None:
