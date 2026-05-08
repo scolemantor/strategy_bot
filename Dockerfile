@@ -7,7 +7,14 @@
 FROM node:20-alpine AS frontend-build
 WORKDIR /build
 COPY dashboard/web/package.json dashboard/web/package-lock.json ./
-RUN npm ci --no-audit --no-fund --omit=optional
+# `npm install` (not `npm ci`) — the lockfile was generated on Windows and
+# omits @rollup/rollup-linux-x64-musl. `npm ci` would refuse to install
+# platform binaries missing from the lockfile; `npm install` resolves
+# optionals for the current platform. To restore strict reproducibility,
+# regenerate package-lock.json inside a node:20-alpine container so the
+# linux-musl deps are pinned, then switch back to `npm ci`.
+# Ref: https://github.com/npm/cli/issues/4828
+RUN npm install --no-audit --no-fund
 COPY dashboard/web/ ./
 RUN npm run build
 
