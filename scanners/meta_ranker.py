@@ -55,6 +55,12 @@ SCANNER_WEIGHTS_PATH = CONFIG_DIR / "scanner_weights.yaml"
 
 EARNINGS_CALENDAR_NAME = "earnings_calendar"
 
+# Sentinels emitted by scanners when a CIK->ticker lookup fails (most often
+# spinoff_tracker, when SEC's mapping doesn't yet include the spun-off
+# entity). These rows are real filings but unactionable — filtered out of
+# master_ranked, while the underlying scanner CSV still contains them.
+INVALID_TICKERS = frozenset({"?", "", "NAN", "NONE", "<NA>"})
+
 
 @dataclass
 class ScannerHit:
@@ -171,6 +177,21 @@ def aggregate(
             log.warning(f"  {scanner_name} has no 'score' column; skipping")
             continue
 
+        # Drop rows with unmapped/empty tickers before they pollute the
+        # aggregate. spinoff_tracker can emit ticker="?" when SEC's
+        # CIK->ticker map lags the filing. fillna("") routes NaN/None
+        # through the same isin() check (NaN survives astype(str) in
+        # recent pandas).
+        mask_invalid = (
+            df["ticker"].fillna("").astype(str).str.strip().str.upper().isin(INVALID_TICKERS)
+        )
+        n_dropped_unmapped = int(mask_invalid.sum())
+        if n_dropped_unmapped > 0:
+            df = df[~mask_invalid].copy()
+        if df.empty:
+            log.info(f"  {scanner_name}: 0 valid tickers after unmapped filter; skipping")
+            continue
+
         # Fix 1: compute 90th-percentile score for normalization
         scores = pd.to_numeric(df["score"], errors="coerce").dropna()
         if scores.empty:
@@ -184,7 +205,7 @@ def aggregate(
         log.info(
             f"  {scanner_name}: {len(df)} candidates "
             f"(weight {weight}, {sc_cfg.get('direction')}/{sc_cfg.get('category')}, "
-            f"p90 norm={norm_factor:.1f})"
+            f"p90 norm={norm_factor:.1f}, unmapped_dropped={n_dropped_unmapped})"
         )
 
         # Fix 2: same-scanner duplicates collapse via groupby
