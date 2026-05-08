@@ -27,6 +27,7 @@ from dashboard.api.jsonl_backfill import backfill_if_empty
 from dashboard.api.routes import auth as auth_routes
 from dashboard.api.routes import history as history_routes
 from dashboard.api.routes import notifications as notifications_routes
+from dashboard.api.routes import settings as settings_routes
 from dashboard.api.routes import ticker as ticker_routes
 from dashboard.api.routes import today as today_routes
 from dashboard.api.routes import watchlist as watchlist_routes
@@ -68,6 +69,7 @@ app.include_router(watchlist_routes.router)
 app.include_router(ticker_routes.router)
 app.include_router(history_routes.router)
 app.include_router(notifications_routes.router)
+app.include_router(settings_routes.router)
 
 
 # Static SPA — only mounted in production where /app/dashboard/web/dist

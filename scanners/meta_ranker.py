@@ -157,6 +157,12 @@ def aggregate(
 
     for scanner_name, sc_cfg in scanner_configs.items():
         weight = float(sc_cfg.get("weight", 1.0))
+        # Phase 7.5: 'enabled' field (default true) is honored alongside
+        # weight==0 as an off-switch, so the dashboard Settings page can
+        # toggle a scanner without losing its weight value.
+        if not sc_cfg.get("enabled", True):
+            log.info(f"  {scanner_name}: enabled=false, excluded")
+            continue
         if weight == 0.0:
             log.info(f"  {scanner_name}: weight=0, excluded")
             continue
