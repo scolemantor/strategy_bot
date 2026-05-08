@@ -276,8 +276,21 @@ def _evaluate_ticker(
     mcap = enrichment.get("market_cap")
     if config.min_market_cap > 0:
         if mcap is None:
-            # Conservative: if we can't determine mcap and floor is set, reject
-            reasons.append("market cap unavailable")
+            # yfinance fundamentals fetch failed (commonly: Yahoo
+            # throttling the host IP). Behavior depends on tier:
+            #   strict     -> reject (high bar; can't verify size)
+            #   loose      -> accept with warning (scanner-side filters
+            #                 already enforce a soft mcap floor for most
+            #                 scanners; missing data shouldn't kill
+            #                 legitimate large-cap candidates)
+            #   permissive -> accept (low bar by definition)
+            if config.tier == "strict":
+                reasons.append("market cap unavailable")
+            else:
+                log.warning(
+                    f"  {ticker}: market cap unavailable; accepting "
+                    f"under tier={config.tier}"
+                )
         elif mcap < config.min_market_cap:
             reasons.append(f"mcap ${mcap/1e6:.1f}M < ${config.min_market_cap/1e6:.0f}M floor")
 
@@ -410,6 +423,38 @@ def _load_yfinance_fundamentals_batch(tickers: List[str]) -> Dict[str, Dict]:
                 log.debug(f"  yfinance fundamentals deadline for {ticker}")
                 out[ticker] = {}
                 continue
+
+            # Detect Yahoo-throttled response. Yahoo silently returns
+            # HTTP 200 with a partial/empty info dict when it rate-limits
+            # cloud IP ranges (DigitalOcean especially). yfinance does
+            # NOT raise in that case. If we cache the empty response, the
+            # 24h TTL poisons every subsequent run for those tickers.
+            # (This is distinct from the deadline-exceeded path above:
+            # deadline = hang/timeout; throttle = fast 200 with no data.)
+            #
+            # A healthy info dict for a listed equity has all three of:
+            # marketCap, sharesOutstanding, regularMarketPrice. If all
+            # three are missing (or info is empty), assume throttle and
+            # skip the cache write so the next run gets a fresh attempt.
+            is_throttled = (
+                not info
+                or (
+                    info.get("marketCap") is None
+                    and info.get("sharesOutstanding") is None
+                    and info.get("regularMarketPrice") is None
+                )
+            )
+            if is_throttled:
+                log.warning(
+                    f"  {ticker}: yfinance returned likely-throttled response "
+                    f"(keys={len(info or {})}, marketCap/sharesOut/price all None); "
+                    f"NOT caching, will retry next run"
+                )
+                out[ticker] = {}
+                if (i + 1) % 50 == 0:
+                    log.info(f"    Fetched {i + 1}/{len(misses)} fundamentals")
+                continue
+
             data = {
                 "name": info.get("longName") or info.get("shortName"),
                 "market_cap": info.get("marketCap"),
