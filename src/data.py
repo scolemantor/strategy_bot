@@ -12,6 +12,7 @@ This module is only used for backtesting, never for live trading.
 """
 from __future__ import annotations
 
+import gc
 import logging
 import os
 import time
@@ -31,6 +32,17 @@ log = logging.getLogger(__name__)
 
 CACHE_DIR = Path("data_cache")
 BATCH_DELAY_SEC = 0.5  # throttle Alpaca batch fetches; ~2 req/sec
+
+
+def _rss_kb() -> int:
+    """Process resident set size in KB. -1 on platforms that don't have
+    resource.getrusage (Windows). Used for diagnostic logging during
+    the batch-volume-correlated hang investigation."""
+    try:
+        import resource  # POSIX-only
+        return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    except Exception:
+        return -1
 
 
 def _to_alpaca_symbol(s: str) -> str:
@@ -162,7 +174,12 @@ def fetch_bars(
         client._retry = 0
         apply_default_timeout(client._session, 60)
 
-        log.info(f"  Batch {batch_num}/{total_batches}: fetching {len(batch)} symbols")
+        # DEBUG (data-volume hang investigation): log RSS at batch start to
+        # check if memory grows linearly with cumulative bar count.
+        log.info(
+            f"  Batch {batch_num}/{total_batches}: fetching {len(batch)} symbols "
+            f"[rss_kb={_rss_kb()} cum_bars={cumulative_rows:,}]"
+        )
         batch_t0 = time.monotonic()
         try:
             # Translate canonical (BRK-B) to Alpaca form (BRK.B) before request;
@@ -197,13 +214,20 @@ def fetch_bars(
         finally:
             # Explicit teardown: close all pool connections and release
             # sockets back to the OS now, rather than waiting for the GC
-            # to reap the discarded client. Without this, discarded clients
-            # accumulated ~1 socket per batch until pool exhaustion (the
-            # actual cause of the batch-10/11 hang we'd been chasing).
+            # to reap the discarded client.
             try:
                 client._session.close()
             except Exception:
                 pass
+            # DEBUG / hypothesis-test (data-volume hang investigation):
+            # the hang correlates with cumulative bar count (~247K), not
+            # batch position. Forcing GC after each batch should reclaim
+            # alpaca-py's Pydantic BarSet response wrappers and any
+            # orphaned response buffers. If RSS still grows linearly with
+            # cumulative_rows after this lands, the leak is in objects
+            # bars_data references directly (the Bar models themselves)
+            # and we'd need a streaming-to-cache refactor instead.
+            gc.collect()
 
     total_elapsed = time.monotonic() - loop_t0
     log.info(
