@@ -119,21 +119,23 @@ def fetch_bars(
         if batch_num > 1:
             time.sleep(BATCH_DELAY_SEC)
 
-        # Phase 7.5 hotfix: fresh Alpaca client per batch. The previous
-        # implementation created one client outside the loop and reused it
-        # across every batch. urllib3's connection pool would accumulate
-        # state from earlier batches; after ~9-10 successful reuses the
-        # pool would hand back a TCP connection that Alpaca's load balancer
-        # had silently cycled, causing the next batch to hang ~30s on a
-        # dead socket (TCP RTO). Confirmed positional: batch 10 in isolation
-        # ran in 3.9s; the same symbols hung when reached after 9 prior
-        # batches. Fresh client = fresh pool = no stale state. Cost is one
-        # TLS handshake per batch (~100-300ms), negligible vs the 0.5s
-        # throttle and 30s deadline.
+        # Fresh Alpaca client per batch. NOTE: this was originally added in
+        # commit e35a99b under the (incorrect) hypothesis that urllib3
+        # connection-pool reuse was causing the batch-10 hang. That diagnosis
+        # was wrong — the real cause was alpaca-py's silent retry-on-429
+        # (see `client._retry = 0` below). Per-batch client is kept as
+        # defensive hygiene (negligible cost, isolates each batch's pool
+        # state) but is NOT what fixes the hang. Cost is one TLS handshake
+        # per batch (~100-300ms), trivial vs the 0.5s throttle.
         client = StockHistoricalDataClient(
             api_key=creds.api_key,
             secret_key=creds.secret_key,
         )
+        # Disable SDK's internal retry-on-429 — defaults are 3 retries × ~3s wait
+        # which appears as a 30s hang. With Algo Trader Plus (10K req/min) we should
+        # rarely hit 429; if we do, failing fast is better than silent retry. Our
+        # with_deadline wrapper provides hard wall-clock cap as backup.
+        client._retry = 0
         apply_default_timeout(client._session, 60)
 
         log.info(f"  Batch {batch_num}/{total_batches}: fetching {len(batch)} symbols")
