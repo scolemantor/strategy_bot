@@ -33,6 +33,20 @@ CACHE_DIR = Path("data_cache")
 BATCH_DELAY_SEC = 0.5  # throttle Alpaca batch fetches; ~2 req/sec
 
 
+def _to_alpaca_symbol(s: str) -> str:
+    """Canonical (yfinance/Wikipedia) -> Alpaca form. BRK-B -> BRK.B etc.
+    Alpaca's data API rejects the dash form for share-class tickers with
+    `{"message":"invalid symbol: BF-B"}`. Other tickers are returned unchanged."""
+    return s.replace("-", ".")
+
+
+def _from_alpaca_symbol(s: str) -> str:
+    """Alpaca form -> canonical. BRK.B -> BRK-B etc. Used to translate
+    response keys back so the rest of the codebase (cache, downstream
+    scanners) sees only canonical symbols."""
+    return s.replace(".", "-")
+
+
 def _cache_path(symbol: str) -> Path:
     return CACHE_DIR / f"{symbol}.parquet"
 
@@ -151,8 +165,12 @@ def fetch_bars(
         log.info(f"  Batch {batch_num}/{total_batches}: fetching {len(batch)} symbols")
         batch_t0 = time.monotonic()
         try:
+            # Translate canonical (BRK-B) to Alpaca form (BRK.B) before request;
+            # response keys translate back so cache + downstream code stays
+            # canonical-only.
+            batch_alpaca = [_to_alpaca_symbol(s) for s in batch]
             req = StockBarsRequest(
-                symbol_or_symbols=batch,
+                symbol_or_symbols=batch_alpaca,
                 timeframe=TimeFrame.Day,
                 start=datetime.combine(start, datetime.min.time()),
                 end=datetime.combine(end, datetime.min.time()),
@@ -162,7 +180,9 @@ def fetch_bars(
             if batch_bars is None:
                 log.warning(f"  Batch {batch_num} hit 30s deadline after {batch_dt:.1f}s; skipping")
                 continue
-            bars_data.update(batch_bars.data)
+            bars_data.update(
+                {_from_alpaca_symbol(k): v for k, v in batch_bars.data.items()}
+            )
             batch_rows = sum(len(v) for v in batch_bars.data.values())
             cumulative_rows += batch_rows
             total_elapsed = time.monotonic() - loop_t0
