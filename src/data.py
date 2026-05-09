@@ -80,12 +80,6 @@ def fetch_bars(
     not cover the requested [start, end] window. Fetched bars are merged into
     the cache rather than overwriting it.
     """
-    client = StockHistoricalDataClient(
-        api_key=creds.api_key,
-        secret_key=creds.secret_key,
-    )
-    apply_default_timeout(client._session, 60)
-
     result: Dict[str, pd.DataFrame] = {}
     to_fetch: List[str] = []
 
@@ -124,6 +118,24 @@ def fetch_bars(
         batch_num = (batch_idx // BATCH_SIZE) + 1
         if batch_num > 1:
             time.sleep(BATCH_DELAY_SEC)
+
+        # Phase 7.5 hotfix: fresh Alpaca client per batch. The previous
+        # implementation created one client outside the loop and reused it
+        # across every batch. urllib3's connection pool would accumulate
+        # state from earlier batches; after ~9-10 successful reuses the
+        # pool would hand back a TCP connection that Alpaca's load balancer
+        # had silently cycled, causing the next batch to hang ~30s on a
+        # dead socket (TCP RTO). Confirmed positional: batch 10 in isolation
+        # ran in 3.9s; the same symbols hung when reached after 9 prior
+        # batches. Fresh client = fresh pool = no stale state. Cost is one
+        # TLS handshake per batch (~100-300ms), negligible vs the 0.5s
+        # throttle and 30s deadline.
+        client = StockHistoricalDataClient(
+            api_key=creds.api_key,
+            secret_key=creds.secret_key,
+        )
+        apply_default_timeout(client._session, 60)
+
         log.info(f"  Batch {batch_num}/{total_batches}: fetching {len(batch)} symbols")
         batch_t0 = time.monotonic()
         try:
