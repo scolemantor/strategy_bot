@@ -23,6 +23,7 @@ import pandas as pd
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame
+from requests.adapters import HTTPAdapter
 
 from .config import BrokerCredentials
 from .http_utils import apply_default_timeout, with_deadline
@@ -80,16 +81,21 @@ def fetch_bars(
     not cover the requested [start, end] window. Fetched bars are merged into
     the cache rather than overwriting it.
 
-    Single Alpaca client shared across all batches: urllib3's connection pool
-    keep-alive reuses the underlying TCP connection. Earlier per-batch client
-    creation (commit e35a99b) leaked sockets — each new client opened a fresh
-    pool but discarded clients didn't release their connections immediately
-    on GC, hitting pool_maxsize=10 by batch 10 (confirmed by socket-count
-    instrumentation in commit e7673e3: tcp count grew 5 -> 13 across batches
-    1-10, then the 11th-pool-acquire blocked).
+    Per-batch client lifecycle (after several rounds of misdiagnosis — see
+    git log for hotfix #1, #2, #3, #4 history):
 
-    SDK retry on 429 disabled via client._retry = 0 (the actual fix for the
-    original 30s hang we'd misattributed to connection pool reuse).
+      - Fresh StockHistoricalDataClient per batch → fresh urllib3 pool,
+        no carryover connection state. Single shared client failed at
+        batch 10 (some accumulated state inside urllib3 or alpaca-py).
+      - HTTPAdapter mounted with pool_connections=100, pool_maxsize=100
+        → headroom for any internal pagination parallelism in alpaca-py.
+        (Default pool_maxsize=10 was a contributing bottleneck.)
+      - client._retry = 0 → disables alpaca-py SDK silent retry-on-429
+        (defaults to 3 retries × 3s wait, surfaced as a 30s "hang").
+      - try/finally with client._session.close() → release all pooled
+        sockets immediately back to OS, instead of waiting for GC.
+        Without this, discarded clients accumulated ~1 socket per batch
+        until pool exhaustion.
     """
     result: Dict[str, pd.DataFrame] = {}
     to_fetch: List[str] = []
@@ -112,19 +118,6 @@ def fetch_bars(
         log.info(f"All {len(symbols)} symbols served from cache")
         return result
 
-    # Single client shared across all batches. urllib3's connection-pool
-    # keep-alive will reuse the underlying TCP connection batch-to-batch.
-    client = StockHistoricalDataClient(
-        api_key=creds.api_key,
-        secret_key=creds.secret_key,
-    )
-    # Disable SDK's internal retry-on-429 — defaults are 3 retries × ~3s wait
-    # which appears as a 30s hang. With Algo Trader Plus (10K req/min) we
-    # should rarely hit 429; failing fast is better than silent retry. Our
-    # with_deadline wrapper provides hard wall-clock cap as backup.
-    client._retry = 0
-    apply_default_timeout(client._session, 60)
-
     BATCH_SIZE = batch_size if batch_size is not None else int(os.environ.get("ALPACA_BATCH_SIZE", "100"))
     total_batches = (len(to_fetch) + BATCH_SIZE - 1) // BATCH_SIZE
     est_minutes = (total_batches * (BATCH_DELAY_SEC + 2)) / 60  # 0.5s throttle + ~2s/batch
@@ -142,6 +135,24 @@ def fetch_bars(
         batch_num = (batch_idx // BATCH_SIZE) + 1
         if batch_num > 1:
             time.sleep(BATCH_DELAY_SEC)
+
+        client = StockHistoricalDataClient(
+            api_key=creds.api_key,
+            secret_key=creds.secret_key,
+        )
+        # Disable SDK's internal retry-on-429 (defaults are 3 retries × 3s
+        # wait, surfaces as a 30s hang). Fail fast instead.
+        client._retry = 0
+        # Replace the default HTTPAdapter with one that has a larger pool.
+        # NOTE: setting adapter.pool_maxsize = N after construction does NOT
+        # reconfigure the underlying urllib3 PoolManager (it's built at
+        # __init__ from the original sizes). We have to mount a fresh
+        # adapter to actually get the new sizes.
+        big_pool_adapter = HTTPAdapter(pool_connections=100, pool_maxsize=100)
+        client._session.mount("https://", big_pool_adapter)
+        client._session.mount("http://", big_pool_adapter)
+        apply_default_timeout(client._session, 60)
+
         log.info(f"  Batch {batch_num}/{total_batches}: fetching {len(batch)} symbols")
         batch_t0 = time.monotonic()
         try:
@@ -168,6 +179,16 @@ def fetch_bars(
         except Exception as e:
             batch_dt = time.monotonic() - batch_t0
             log.warning(f"  Batch {batch_num} failed after {batch_dt:.1f}s: {e}; continuing with next batch")
+        finally:
+            # Explicit teardown: close all pool connections and release
+            # sockets back to the OS now, rather than waiting for the GC
+            # to reap the discarded client. Without this, discarded clients
+            # accumulated ~1 socket per batch until pool exhaustion (the
+            # actual cause of the batch-10/11 hang we'd been chasing).
+            try:
+                client._session.close()
+            except Exception:
+                pass
 
     total_elapsed = time.monotonic() - loop_t0
     log.info(
