@@ -23,7 +23,6 @@ import pandas as pd
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame
-from requests.adapters import HTTPAdapter
 
 from .config import BrokerCredentials
 from .http_utils import apply_default_timeout, with_deadline
@@ -82,20 +81,24 @@ def fetch_bars(
     the cache rather than overwriting it.
 
     Per-batch client lifecycle (after several rounds of misdiagnosis — see
-    git log for hotfix #1, #2, #3, #4 history):
+    git log for hotfix #1-#5 history):
 
       - Fresh StockHistoricalDataClient per batch → fresh urllib3 pool,
-        no carryover connection state. Single shared client failed at
-        batch 10 (some accumulated state inside urllib3 or alpaca-py).
-      - HTTPAdapter mounted with pool_connections=100, pool_maxsize=100
-        → headroom for any internal pagination parallelism in alpaca-py.
-        (Default pool_maxsize=10 was a contributing bottleneck.)
+        no carryover connection state. Single shared client (hotfix #3)
+        failed at batch 10 — some accumulated state inside urllib3 or
+        alpaca-py we never fully isolated.
       - client._retry = 0 → disables alpaca-py SDK silent retry-on-429
-        (defaults to 3 retries × 3s wait, surfaced as a 30s "hang").
-      - try/finally with client._session.close() → release all pooled
-        sockets immediately back to OS, instead of waiting for GC.
-        Without this, discarded clients accumulated ~1 socket per batch
-        until pool exhaustion.
+        (defaults to 3 retries × 3s wait, surfaces as a 30s "hang").
+      - try/finally with client._session.close() → best-effort socket
+        release. urllib3 2.x's PoolManager.clear() only empties the
+        pool dict (actual connection close depends on GC), so this is
+        not a hard guarantee but doesn't hurt.
+
+    Hotfix #4 also tried mounting a fresh HTTPAdapter with pool_maxsize=100;
+    that REGRESSED — alpaca-py mounts its own adapter with custom request
+    handling, replacing it with a vanilla one introduced "invalid symbol"
+    errors for dotted tickers (BF-B, CWEN-A, MOG-A) and shifted the hang
+    forward to batch 10. Don't re-mount adapters; let alpaca-py keep its.
     """
     result: Dict[str, pd.DataFrame] = {}
     to_fetch: List[str] = []
@@ -143,14 +146,6 @@ def fetch_bars(
         # Disable SDK's internal retry-on-429 (defaults are 3 retries × 3s
         # wait, surfaces as a 30s hang). Fail fast instead.
         client._retry = 0
-        # Replace the default HTTPAdapter with one that has a larger pool.
-        # NOTE: setting adapter.pool_maxsize = N after construction does NOT
-        # reconfigure the underlying urllib3 PoolManager (it's built at
-        # __init__ from the original sizes). We have to mount a fresh
-        # adapter to actually get the new sizes.
-        big_pool_adapter = HTTPAdapter(pool_connections=100, pool_maxsize=100)
-        client._session.mount("https://", big_pool_adapter)
-        client._session.mount("http://", big_pool_adapter)
         apply_default_timeout(client._session, 60)
 
         log.info(f"  Batch {batch_num}/{total_batches}: fetching {len(batch)} symbols")
