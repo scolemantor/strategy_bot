@@ -1,7 +1,8 @@
 """Registry of all scanners. Add new ones here as they're built.
 
-Currently 14 scanners registered (#18 congressional_trades activated
-2026-05-08; #14-17 paid-data scanners still deferred per Phase 4g).
+Currently 14 scanners registered, 14 active in scan_all (#18
+congressional_trades enabled in scan_all 2026-05-09 after standalone
+validation; #14-17 paid-data scanners still deferred per Phase 4g).
 """
 from __future__ import annotations
 
@@ -42,9 +43,7 @@ SCANNERS: Dict[str, Type[Scanner]] = {
 
 # Scanners temporarily skipped during `scan.py all` but still available
 # via `scan.py run NAME`. Add a comment with reason + date when disabling.
-DISABLED_IN_SCAN_ALL: set[str] = {
-    "congressional_trades",  # 2026-05-08: newly activated; pending standalone validation runs
-}
+DISABLED_IN_SCAN_ALL: set[str] = set()
 
 
 def get_scanner(name: str) -> Scanner:
