@@ -12,8 +12,12 @@ This module is only used for backtesting, never for live trading.
 """
 from __future__ import annotations
 
+import faulthandler
 import logging
 import os
+import socket
+import sys
+import threading
 import time
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -31,6 +35,107 @@ log = logging.getLogger(__name__)
 
 CACHE_DIR = Path("data_cache")
 BATCH_DELAY_SEC = 0.5  # throttle Alpaca batch fetches; ~2 req/sec
+ALPACA_DATA_HOST = "data.alpaca.markets"
+
+
+# --- DEBUG INSTRUMENTATION (Phase 7.5 batch-11 investigation) ---
+# This block is temporary diagnostics. Remove after root cause identified.
+# Captures per-batch process state and dumps all thread stacks if any
+# batch hangs >25s, so we can see where the call is actually blocked.
+# faulthandler.dump_traceback_later was unreliable due to module path
+# issues; threading.Timer + faulthandler.dump_traceback (in-process call)
+# works around that.
+
+def _read_socket_count() -> Dict[str, int]:
+    """Read /proc/self/net/tcp + tcp6 line counts (each line = one socket)."""
+    out = {"tcp": -1, "tcp6": -1}
+    for proto in ("tcp", "tcp6"):
+        try:
+            with open(f"/proc/self/net/{proto}", "r") as f:
+                out[proto] = sum(1 for _ in f) - 1  # subtract header
+        except Exception:
+            pass
+    return out
+
+
+def _read_max_rss_kb() -> int:
+    """Best-effort process max RSS in KB. -1 on failure (e.g. Windows)."""
+    try:
+        import resource  # POSIX-only
+        return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    except Exception:
+        return -1
+
+
+def _inspect_session_pools(session) -> str:
+    """Stringify urllib3 pool state from a requests.Session."""
+    try:
+        adapter = session.get_adapter(f"https://{ALPACA_DATA_HOST}")
+        pm = adapter.poolmanager
+        pools = list(pm.pools.keys()) if hasattr(pm, "pools") else []
+        return (
+            f"adapter={type(adapter).__name__} "
+            f"pool_connections={getattr(adapter, '_pool_connections', '?')} "
+            f"pool_maxsize={getattr(adapter, '_pool_maxsize', '?')} "
+            f"active_pools={len(pools)}"
+        )
+    except Exception as e:
+        return f"inspect_failed:{type(e).__name__}:{e}"
+
+
+def _dns_probe(host: str) -> str:
+    """Quick DNS sanity check at hang-time. Returns IP or error string."""
+    try:
+        t0 = time.monotonic()
+        ip = socket.gethostbyname(host)
+        dt = (time.monotonic() - t0) * 1000
+        return f"{ip} in {dt:.1f}ms"
+    except Exception as e:
+        return f"FAILED: {type(e).__name__}: {e}"
+
+
+def _dump_diagnostic_state(batch_num: int, batch_size: int) -> None:
+    """Fires from a threading.Timer at 25s into a hung batch. Dumps
+    everything we can reach: memory, sockets, DNS at-this-moment, and
+    all Python thread stacks (which should show the worker thread blocked
+    in whatever call is actually hanging)."""
+    print("", file=sys.stderr, flush=True)
+    print(
+        f"=== [BATCH {batch_num}] HANG WARNING — 25s without completion "
+        f"(symbols={batch_size}) ===",
+        file=sys.stderr, flush=True,
+    )
+    socks = _read_socket_count()
+    print(
+        f"  sockets: tcp={socks['tcp']} tcp6={socks['tcp6']}  "
+        f"max_rss_kb={_read_max_rss_kb()}",
+        file=sys.stderr, flush=True,
+    )
+    print(
+        f"  dns probe (live, separate from alpaca-py): {ALPACA_DATA_HOST} -> "
+        f"{_dns_probe(ALPACA_DATA_HOST)}",
+        file=sys.stderr, flush=True,
+    )
+    # getaddrinfo specifically (urllib3 uses this, not gethostbyname)
+    try:
+        t0 = time.monotonic()
+        infos = socket.getaddrinfo(ALPACA_DATA_HOST, 443, type=socket.SOCK_STREAM)
+        dt = (time.monotonic() - t0) * 1000
+        print(
+            f"  getaddrinfo (live, urllib3-style): {len(infos)} results in {dt:.1f}ms; "
+            f"families={sorted({i[0].name for i in infos})}",
+            file=sys.stderr, flush=True,
+        )
+    except Exception as e:
+        print(
+            f"  getaddrinfo (live, urllib3-style): FAILED {type(e).__name__}: {e}",
+            file=sys.stderr, flush=True,
+        )
+    print(f"  python threads: {threading.active_count()} active", file=sys.stderr, flush=True)
+    print("=== ALL THREAD STACKS ===", file=sys.stderr, flush=True)
+    faulthandler.dump_traceback(file=sys.stderr, all_threads=True)
+    print("=== END DIAGNOSTIC DUMP ===", file=sys.stderr, flush=True)
+    print("", file=sys.stderr, flush=True)
 
 
 def _cache_path(symbol: str) -> Path:
@@ -138,8 +243,25 @@ def fetch_bars(
         client._retry = 0
         apply_default_timeout(client._session, 60)
 
-        log.info(f"  Batch {batch_num}/{total_batches}: fetching {len(batch)} symbols")
+        # DEBUG (batch-11 investigation): per-batch state snapshot
+        socks_before = _read_socket_count()
+        pool_state = _inspect_session_pools(client._session)
+        log.info(
+            f"  Batch {batch_num}/{total_batches}: fetching {len(batch)} symbols "
+            f"[sockets tcp={socks_before['tcp']} tcp6={socks_before['tcp6']}; {pool_state}]"
+        )
         batch_t0 = time.monotonic()
+
+        # DEBUG (batch-11 investigation): if this batch takes >25s, dump
+        # all thread stacks + memory/socket/DNS state to stderr. The timer
+        # is cancelled cleanly on success, so successful batches produce
+        # no extra output.
+        dump_timer = threading.Timer(
+            25.0, _dump_diagnostic_state, args=(batch_num, len(batch)),
+        )
+        dump_timer.daemon = True
+        dump_timer.start()
+
         try:
             req = StockBarsRequest(
                 symbol_or_symbols=batch,
@@ -163,7 +285,23 @@ def fetch_bars(
             )
         except Exception as e:
             batch_dt = time.monotonic() - batch_t0
-            log.warning(f"  Batch {batch_num} failed after {batch_dt:.1f}s: {e}; continuing with next batch")
+            # DEBUG: capture FULL exception chain (tells us what error class is
+            # actually being raised — Sean's report mentioned the "DNS error" is
+            # a misleading wrapper. We want the unwrapped __cause__ chain.)
+            chain = []
+            cur = e
+            while cur is not None and len(chain) < 10:
+                chain.append(f"{type(cur).__name__}: {cur}")
+                cur = getattr(cur, "__cause__", None) or getattr(cur, "__context__", None)
+                if cur is e:
+                    break
+            log.warning(
+                f"  Batch {batch_num} failed after {batch_dt:.1f}s; continuing.\n"
+                f"    exception chain ({len(chain)} levels):\n    "
+                + "\n    ".join(chain)
+            )
+        finally:
+            dump_timer.cancel()
 
     total_elapsed = time.monotonic() - loop_t0
     log.info(
