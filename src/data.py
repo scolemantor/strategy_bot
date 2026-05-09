@@ -156,7 +156,6 @@ def fetch_bars(
         f"{len(symbols) - len(to_fetch)} from cache"
     )
 
-    bars_data = {}
     cumulative_rows = 0
     loop_t0 = time.monotonic()
     for batch_idx in range(0, len(to_fetch), BATCH_SIZE):
@@ -174,8 +173,6 @@ def fetch_bars(
         client._retry = 0
         apply_default_timeout(client._session, 60)
 
-        # DEBUG (data-volume hang investigation): log RSS at batch start to
-        # check if memory grows linearly with cumulative bar count.
         log.info(
             f"  Batch {batch_num}/{total_batches}: fetching {len(batch)} symbols "
             f"[rss_kb={_rss_kb()} cum_bars={cumulative_rows:,}]"
@@ -197,89 +194,108 @@ def fetch_bars(
             if batch_bars is None:
                 log.warning(f"  Batch {batch_num} hit 30s deadline after {batch_dt:.1f}s; skipping")
                 continue
-            bars_data.update(
-                {_from_alpaca_symbol(k): v for k, v in batch_bars.data.items()}
+
+            # Stream this batch's bars into DataFrames + cache RIGHT NOW.
+            # Older code accumulated all batches' Pydantic Bar objects in a
+            # bars_data dict, then post-processed at the end. With ~41K bars
+            # per batch × ~400B per Bar ≈ 16 MB per batch, and the container
+            # has ~440MB available headroom (1GB total minus Postgres +
+            # uvicorn + cron); accumulating 6+ batches pushed past the limit
+            # and manifested as the urllib3-timeout-disguised-as-DNS-error
+            # hang. Streaming per batch caps live memory at one batch's
+            # worth regardless of universe size.
+            batch_rows = _process_batch_bars(
+                batch_bars.data, result, start, end, use_cache,
             )
-            batch_rows = sum(len(v) for v in batch_bars.data.values())
+            del batch_bars  # release alpaca-py's BarSet wrapper immediately
             cumulative_rows += batch_rows
             total_elapsed = time.monotonic() - loop_t0
             log.info(
                 f"  Batch {batch_num}/{total_batches} done in {batch_dt:.1f}s: "
-                f"{len(batch_bars.data)} symbols, {batch_rows:,} bars "
+                f"{batch_rows:,} bars "
                 f"(cum: {cumulative_rows:,} bars, {total_elapsed:.0f}s)"
             )
         except Exception as e:
             batch_dt = time.monotonic() - batch_t0
             log.warning(f"  Batch {batch_num} failed after {batch_dt:.1f}s: {e}; continuing with next batch")
         finally:
-            # Explicit teardown: close all pool connections and release
-            # sockets back to the OS now, rather than waiting for the GC
-            # to reap the discarded client.
             try:
                 client._session.close()
             except Exception:
                 pass
-            # DEBUG / hypothesis-test (data-volume hang investigation):
-            # the hang correlates with cumulative bar count (~247K), not
-            # batch position. Forcing GC after each batch should reclaim
-            # alpaca-py's Pydantic BarSet response wrappers and any
-            # orphaned response buffers. If RSS still grows linearly with
-            # cumulative_rows after this lands, the leak is in objects
-            # bars_data references directly (the Bar models themselves)
-            # and we'd need a streaming-to-cache refactor instead.
+            # Force GC so the alpaca-py response wrappers + per-batch
+            # DataFrames go away promptly instead of waiting for a
+            # threshold-triggered cycle.
             gc.collect()
 
-    total_elapsed = time.monotonic() - loop_t0
-    log.info(
-        f"Fetch complete: {len(bars_data)} symbols, {cumulative_rows:,} total bars in {total_elapsed:.0f}s"
-    )
-
-    class _BarsContainer:
-        def __init__(self, data):
-            self.data = data
-    bars = _BarsContainer(bars_data)
-
+    # Symbols that Alpaca didn't return data for: emit an empty DataFrame
+    # so the caller's `for sym in result` loops still see them.
     for symbol in to_fetch:
-        if symbol not in bars.data:
+        if symbol not in result:
             log.warning(f"No bars returned for {symbol}")
             result[symbol] = pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
-            continue
 
-        rows = []
-        for bar in bars.data[symbol]:
-            rows.append({
+    total_elapsed = time.monotonic() - loop_t0
+    non_empty = sum(1 for df in result.values() if not df.empty)
+    log.info(
+        f"Fetch complete: {non_empty} symbols with bars, {cumulative_rows:,} "
+        f"total bars in {total_elapsed:.0f}s"
+    )
+
+    return result
+
+
+def _process_batch_bars(
+    batch_data: Dict[str, list],
+    result: Dict[str, pd.DataFrame],
+    start: date,
+    end: date,
+    use_cache: bool,
+) -> int:
+    """Convert one batch's per-symbol Bar lists into DataFrames, save to
+    cache, and write into `result`. Returns total bar count for the batch.
+
+    Called from inside the fetch_bars batch loop so that each batch's raw
+    response objects can be released immediately rather than accumulated.
+    """
+    batch_rows = 0
+    for sym_alpaca, bars_list in batch_data.items():
+        sym = _from_alpaca_symbol(sym_alpaca)
+        rows = [
+            {
                 "timestamp": bar.timestamp,
                 "open": float(bar.open),
                 "high": float(bar.high),
                 "low": float(bar.low),
                 "close": float(bar.close),
                 "volume": float(bar.volume),
-            })
-        df = pd.DataFrame(rows)
-        if df.empty:
-            result[symbol] = df
+            }
+            for bar in bars_list
+        ]
+        batch_rows += len(rows)
+        if not rows:
             continue
+        df = pd.DataFrame(rows)
         df["timestamp"] = pd.to_datetime(df["timestamp"]).dt.tz_localize(None)
         df = df.set_index("timestamp").sort_index()
 
         if use_cache:
-            _save_cached(symbol, df)
-            # After cache merge, return the FULL cache for downstream use,
-            # not just the freshly-fetched portion. This way the caller
+            _save_cached(sym, df)
+            # After cache merge, return the FULL cache window for downstream
+            # use, not just the freshly-fetched portion. This way the caller
             # gets all available history including data fetched in earlier
             # calls with different windows.
-            full_cached = _load_cached(symbol)
+            full_cached = _load_cached(sym)
             if full_cached is not None:
-                result[symbol] = full_cached.loc[
+                result[sym] = full_cached.loc[
                     (full_cached.index >= pd.Timestamp(start)) &
                     (full_cached.index <= pd.Timestamp(end))
                 ]
             else:
-                result[symbol] = df
+                result[sym] = df
         else:
-            result[symbol] = df
-
-    return result
+            result[sym] = df
+    return batch_rows
 
 
 def aligned_close_prices(bars: Dict[str, pd.DataFrame]) -> pd.DataFrame:
