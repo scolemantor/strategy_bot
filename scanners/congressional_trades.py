@@ -229,12 +229,15 @@ class CongressionalTradesScanner(Scanner):
         # Quiver returns one combined array; split on the `Chamber` field.
         # Values are "Representatives" or "Senate" (verified live 2026-05-09);
         # _parse_quiver_record normalizes both to "house" / "senate".
+        # Use the (x or "") guard pattern in case Quiver returns null for
+        # Chamber on some records — `str(None)` would produce the literal
+        # "None" which silently miscategorizes; "" cleanly counts as 0.
         house_count = sum(
             1 for r in raw_records
-            if str(r.get("Chamber", "")).lower() in ("house", "representatives")
+            if (r.get("Chamber") or "").lower() in ("house", "representatives")
         )
         senate_count = sum(
-            1 for r in raw_records if str(r.get("Chamber", "")).lower() == "senate"
+            1 for r in raw_records if (r.get("Chamber") or "").lower() == "senate"
         )
         # Date-filter effectiveness diagnostic: log oldest/latest Filed
         # dates so we can tell whether Quiver server-side filtered or
@@ -477,6 +480,13 @@ class CongressionalTradesScanner(Scanner):
           excess_return (lowercase — Quiver's per-trade alpha vs SPY)
           last_modified
         """
+        # Defensive (x or "") guards on every string field — Quiver
+        # returns null for many fields on a non-trivial fraction of
+        # records (Company, Status, Description, sometimes TickerType
+        # and Chamber). The `or ""` collapses None to "" so the
+        # downstream .strip()/.upper()/.lower() always operate on a
+        # real string. Non-string values (numbers, dicts) would still
+        # crash here — caught by the AttributeError/TypeError except below.
         try:
             ticker = (raw.get("Ticker") or "").strip().upper()
             member = (raw.get("Name") or "").strip()
@@ -485,7 +495,7 @@ class CongressionalTradesScanner(Scanner):
             trade_size_raw = (raw.get("Trade_Size_USD") or "").strip()
             txn_date = self._parse_date(raw.get("Traded"))
             disc_date = self._parse_date(raw.get("Filed"))
-            chamber_raw = str(raw.get("Chamber", "")).strip().lower()
+            chamber_raw = (raw.get("Chamber") or "").strip().lower()
             ticker_type = (raw.get("TickerType") or "").strip().upper()
         except (AttributeError, TypeError):
             return None
