@@ -23,23 +23,34 @@ DATA SOURCE (Phase 7 hotfix history):
     endpoint covers both chambers.
 
 Endpoint: `https://api.quiverquant.com/beta/bulk/congresstrading`
-Auth:     `Authorization: Bearer <QUIVER_API_KEY>` header (per Quiver's
-          OpenAPI spec; their official Python wrapper uses the legacy
-          `Token` form which is also accepted)
-Schema:   one JSON array. Each record has `Representative`, `BioGuideID`,
-          `Ticker`, `Transaction` (Purchase/Sale/...), `Range` (STOCK Act
-          bracket string), `Amount`, `District`, `House` (chamber
-          discriminator: "Representatives" or "Senate"), `Party`,
-          `TickerType` ("CS" or "ST" for common stock; other values for
-          non-equity), `ReportDate`, `TransactionDate`, `last_modified`,
-          plus performance fields `ExcessReturn`, `PriceChange`,
-          `SPYChange` (Quiver's per-trade alpha-vs-SPY tracking).
+Auth:     `Authorization: Bearer <QUIVER_API_KEY>` header (the legacy
+          `Token` form is also accepted)
+Schema:   verified live response 2026-05-09 differs from the published
+          OpenAPI spec. Actual fields per record:
+            Name (member, was Representative in spec)
+            BioGuideID
+            Filed (disclosure date YYYY-MM-DD, was ReportDate)
+            Traded (transaction date YYYY-MM-DD, was TransactionDate)
+            Ticker
+            TickerType ("CS" common stock, "ST" stock; others non-equity)
+            Transaction ("Purchase" / "Sale" / etc)
+            Trade_Size_USD (numeric string like "15001.0" — NOT a bracket
+                            range. Parse as float directly.)
+            Chamber ("Representatives" or "Senate", was House)
+            Party ("Democratic" / "Republican")
+            District (numeric string with decimal e.g. "4.0")
+            Description, Comments, Status, Company, Subholding, State,
+            Quiver_Upload_Time (often null)
+            excess_return (lowercase, was ExcessReturn — Quiver's
+                            per-trade alpha vs SPY)
+            last_modified
+          PriceChange + SPYChange fields the spec advertised do NOT exist
+          in this endpoint's actual response.
 Filters:  defensive `date_from` + `date_to` + `page=1` + `page_size=10000`
-          query params — if Quiver honors them we save bandwidth, if not
-          we still get the full array and client-side cutoff filter applies.
+          query params. May or may not be honored server-side — we log
+          oldest/latest Filed dates after fetch so we can verify.
 TickerType: hard filter to CS/ST common stock only. Empty/missing
-          TickerType drops the record (V2 schema is well-populated; a
-          blank field signals non-equity).
+          TickerType drops the record.
 
 Sign up at https://api.quiverquant.com/pricing and add
 `QUIVER_API_KEY=...` to .env. Without the env var set the scanner returns
@@ -99,19 +110,6 @@ CACHE_TTL_HOURS = 6
 
 HIGH_SIGNAL_MEMBERS: List[str] = []
 
-AMOUNT_BRACKETS: Dict[str, Tuple[float, float]] = {
-    "$1,001 - $15,000":           (1_001,        15_000),
-    "$15,001 - $50,000":          (15_001,       50_000),
-    "$50,001 - $100,000":         (50_001,      100_000),
-    "$100,001 - $250,000":        (100_001,     250_000),
-    "$250,001 - $500,000":        (250_001,     500_000),
-    "$500,001 - $1,000,000":      (500_001,    1_000_000),
-    "$1,000,001 - $5,000,000":    (1_000_001,  5_000_000),
-    "$5,000,001 - $25,000,000":   (5_000_001, 25_000_000),
-    "$25,000,001 - $50,000,000":  (25_000_001, 50_000_000),
-    "$50,000,001 +":              (50_000_001, 100_000_000),
-}
-
 # Substrings that, when present in asset_description, mark the asset as
 # something other than common stock and disqualify the trade.
 NON_COMMON_STOCK_HINTS = (
@@ -153,7 +151,6 @@ class CongressionalTrade:
     # cached pre-migration JSON deserializes cleanly via from_dict.
     ticker_type: str = ""
     excess_return: Optional[float] = None
-    price_change: Optional[float] = None
 
     @property
     def amount_midpoint(self) -> float:
@@ -219,17 +216,30 @@ class CongressionalTradesScanner(Scanner):
             log.exception("Failed to fetch Quiver congressional trading feed")
             return empty_result(self.name, run_date, error=f"quiver feed: {e}")
 
-        # Quiver returns one combined array; split on the `House` field.
-        # V2 schema values are "Representatives" / "Senate" (V1 was "House" /
-        # "Senate"); _parse_quiver_record normalizes both to "house"/"senate".
+        # Quiver returns one combined array; split on the `Chamber` field.
+        # Values are "Representatives" or "Senate" (verified live 2026-05-09);
+        # _parse_quiver_record normalizes both to "house" / "senate".
         house_count = sum(
             1 for r in raw_records
-            if str(r.get("House", "")).lower() in ("house", "representatives")
+            if str(r.get("Chamber", "")).lower() in ("house", "representatives")
         )
-        senate_count = sum(1 for r in raw_records if str(r.get("House", "")).lower() == "senate")
+        senate_count = sum(
+            1 for r in raw_records if str(r.get("Chamber", "")).lower() == "senate"
+        )
+        # Date-filter effectiveness diagnostic: log oldest/latest Filed
+        # dates so we can tell whether Quiver server-side filtered or
+        # returned everything (in which case our client-side cutoff filter
+        # below is what's actually narrowing the data).
+        filed_dates = [self._parse_date(r.get("Filed")) for r in raw_records]
+        filed_dates = [d for d in filed_dates if d is not None]
+        oldest_filed = min(filed_dates) if filed_dates else None
+        latest_filed = max(filed_dates) if filed_dates else None
+        in_window_count = sum(1 for d in filed_dates if cutoff <= d <= run_date)
         log.info(
             f"Loaded {len(raw_records)} total records "
-            f"(house={house_count}, senate={senate_count})"
+            f"(house={house_count}, senate={senate_count}; "
+            f"filed range {oldest_filed} -> {latest_filed}; "
+            f"{in_window_count} within cutoff window {cutoff} -> {run_date})"
         )
 
         trades: List[CongressionalTrade] = []
@@ -304,18 +314,15 @@ class CongressionalTradesScanner(Scanner):
 
             members_list = "; ".join(sorted({t.member_name for t in group if t.member_name}))
 
-            # Phase 7 hotfix: Quiver returns per-trade alpha vs SPY
-            # (ExcessReturn) and absolute price change since the trade
-            # (PriceChange). Aggregate across the cluster as a confidence
-            # signal — DATA only for now, not folded into the score
-            # formula until a separate meta_ranker commit weights it.
+            # Phase 7 hotfix: Quiver returns per-trade alpha vs SPY in the
+            # `excess_return` field. Aggregate across the cluster as a
+            # confidence signal — DATA only for now, not folded into the
+            # score formula until a separate meta_ranker commit weights it.
+            # (PriceChange + SPYChange fields the spec advertised do not
+            # actually exist in this endpoint's response.)
             er_values = [t.excess_return for t in group if t.excess_return is not None]
-            pc_values = [t.price_change for t in group if t.price_change is not None]
             avg_excess_return = (
                 round(sum(er_values) / len(er_values), 4) if er_values else None
-            )
-            avg_price_change = (
-                round(sum(pc_values) / len(pc_values), 4) if pc_values else None
             )
 
             if has_high_signal and n_members >= self.MIN_CLUSTER_MEMBERS:
@@ -341,7 +348,6 @@ class CongressionalTradesScanner(Scanner):
                 "members_list": members_list,
                 "chambers": chambers,
                 "avg_excess_return": avg_excess_return,
-                "avg_price_change": avg_price_change,
                 "score": round(score, 2),
                 "reason": reason,
             })
@@ -415,17 +421,17 @@ class CongressionalTradesScanner(Scanner):
             )
 
         # Truncation diagnostic: if the response is exactly page_size,
-        # we may have hit a server-side cap. Check the latest TransactionDate
+        # we may have hit a server-side cap. Check the oldest Traded date
         # to tell if we got the full window or only the most recent slice.
         if len(data) == QUIVER_PAGE_SIZE:
-            txn_dates = [self._parse_date(r.get("TransactionDate")) for r in data]
+            txn_dates = [self._parse_date(r.get("Traded")) for r in data]
             txn_dates = [d for d in txn_dates if d is not None]
             latest_txn = max(txn_dates) if txn_dates else None
             oldest_txn = min(txn_dates) if txn_dates else None
             within_window = oldest_txn is not None and oldest_txn <= cutoff
             log.warning(
                 f"Quiver returned exactly {QUIVER_PAGE_SIZE} records — "
-                f"may be truncated. latest_txn={latest_txn} oldest_txn={oldest_txn} "
+                f"may be truncated. latest_traded={latest_txn} oldest_traded={oldest_txn} "
                 f"cutoff={cutoff} within_window={within_window}. "
                 f"If within_window=False, pagination loop is required."
             )
@@ -435,25 +441,35 @@ class CongressionalTradesScanner(Scanner):
         return data
 
     def _parse_quiver_record(self, raw: Dict) -> Optional[CongressionalTrade]:
-        """Parse one Quiver bulk congresstrading record (V2 schema).
+        """Parse one Quiver bulk congresstrading record.
 
-        Field reference (verified against Quiver OpenAPI spec May 2026):
-          Representative, BioGuideID, ReportDate, TransactionDate, Ticker,
-          Transaction (Purchase / Sale (Partial) / Sale (Full) / Exchange),
-          Range (STOCK Act bracket string), Amount, District,
-          House (Representatives / Senate), Party (R / D),
-          TickerType (CS = common stock, ST = stock, others non-equity),
-          last_modified, ExcessReturn, PriceChange, SPYChange.
+        Field reference (verified live response 2026-05-09 — differs from
+        the published OpenAPI spec):
+          Name (member name, was Representative in spec)
+          BioGuideID
+          Filed (disclosure date string YYYY-MM-DD, was ReportDate)
+          Traded (transaction date string YYYY-MM-DD, was TransactionDate)
+          Ticker
+          TickerType ("CS"/"ST" common stock, others non-equity)
+          Transaction ("Purchase" / "Sale" / etc)
+          Trade_Size_USD (numeric string e.g. "15001.0" — NOT a STOCK Act
+                          bracket range; parse as float directly)
+          Chamber ("Representatives" or "Senate", was House)
+          Party ("Democratic" / "Republican")
+          District (numeric string), Description, Comments, Status, Company,
+          Subholding, State, Quiver_Upload_Time (often null)
+          excess_return (lowercase — Quiver's per-trade alpha vs SPY)
+          last_modified
         """
         try:
             ticker = (raw.get("Ticker") or "").strip().upper()
-            member = (raw.get("Representative") or "").strip()
+            member = (raw.get("Name") or "").strip()
             txn_type_raw = (raw.get("Transaction") or "").strip().lower()
             asset_desc = (raw.get("Description") or "").strip()
-            amount_raw = (raw.get("Range") or raw.get("Amount") or "").strip()
-            txn_date = self._parse_date(raw.get("TransactionDate"))
-            disc_date = self._parse_date(raw.get("ReportDate"))
-            chamber_raw = str(raw.get("House", "")).strip().lower()
+            trade_size_raw = (raw.get("Trade_Size_USD") or "").strip()
+            txn_date = self._parse_date(raw.get("Traded"))
+            disc_date = self._parse_date(raw.get("Filed"))
+            chamber_raw = str(raw.get("Chamber", "")).strip().lower()
             ticker_type = (raw.get("TickerType") or "").strip().upper()
         except (AttributeError, TypeError):
             return None
@@ -463,8 +479,7 @@ class CongressionalTradesScanner(Scanner):
         if ticker in ("--", "N/A", ""):
             ticker = ""
 
-        # `House` field is "Representatives" or "Senate" in V2 schema
-        # ("House" in V1). Normalize both forms.
+        # `Chamber` is literally "Representatives" or "Senate"; normalize.
         if chamber_raw == "senate":
             chamber = "senate"
         elif chamber_raw in ("house", "representatives"):
@@ -472,12 +487,15 @@ class CongressionalTradesScanner(Scanner):
         else:
             chamber = "unknown"
 
-        amount_min, amount_max = self._parse_amount(amount_raw)
+        # Trade_Size_USD is a single numeric string, not a STOCK Act bracket
+        # range. min == max == midpoint == this value. Use 0/0 if missing
+        # so downstream score formulas see a real but-tiny contribution.
+        trade_size = _coerce_float(trade_size_raw) or 0.0
+        amount_min = trade_size
+        amount_max = trade_size
 
-        # Performance fields — Quiver's per-trade alpha tracking.
-        # Float-coerce defensively; missing/null → None.
-        excess_return = _coerce_float(raw.get("ExcessReturn"))
-        price_change = _coerce_float(raw.get("PriceChange"))
+        # Quiver's per-trade alpha tracking.
+        excess_return = _coerce_float(raw.get("excess_return"))
 
         return CongressionalTrade(
             ticker=ticker,
@@ -489,15 +507,14 @@ class CongressionalTradesScanner(Scanner):
             amount_min=amount_min,
             amount_max=amount_max,
             asset_description=asset_desc,
-            # Quiver `Transaction` values: "Purchase", "Sale (Full)",
-            # "Sale (Partial)", "Exchange". Treat anything containing
-            # "purchase" as a buy.
+            # Quiver `Transaction` values include "Purchase", "Sale",
+            # "Sale (Full)", "Sale (Partial)", "Exchange". Treat anything
+            # containing "purchase" as a buy.
             is_purchase=("purchase" in txn_type_raw),
             is_high_signal_member=self._is_high_signal(member),
-            raw_amount=amount_raw,
+            raw_amount=trade_size_raw,
             ticker_type=ticker_type,
             excess_return=excess_return,
-            price_change=price_change,
         )
 
     @staticmethod
@@ -511,20 +528,6 @@ class CongressionalTradesScanner(Scanner):
             except ValueError:
                 continue
         return None
-
-    @staticmethod
-    def _parse_amount(amount_str: str) -> Tuple[float, float]:
-        if not amount_str:
-            return (0.0, 0.0)
-        normalized = re.sub(r"\s+", " ", amount_str).strip()
-        normalized = re.sub(r"[–—−]", "-", normalized)
-        if normalized in AMOUNT_BRACKETS:
-            return AMOUNT_BRACKETS[normalized]
-        log.debug(
-            f"  _parse_amount: unparseable bracket — raw={amount_str!r} "
-            f"normalized={normalized!r}"
-        )
-        return (0.0, 0.0)
 
     @staticmethod
     def _is_common_stock(asset_description: str) -> bool:
