@@ -39,6 +39,11 @@ export function WatchlistButton({
   const add = useWatchlistStore((s) => s.add);
   const remove = useWatchlistStore((s) => s.remove);
 
+  // Phase 8c Issue B diagnostic — fires on every render
+  console.log(
+    `[WB] ${sym} isWatched=${isWatched} isPending=${isPending} hasEntry=${!!entry}`,
+  );
+
   const hasPosition =
     entry?.position_size != null && entry.position_size > 0;
 

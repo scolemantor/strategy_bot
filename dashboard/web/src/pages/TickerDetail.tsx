@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { useParams } from "react-router-dom";
-import { api } from "../api";
+import { api, ApiError } from "../api";
 import { LoadingSpinner } from "../components/LoadingSpinner";
 import { ScannerBadge } from "../components/ScannerBadge";
 import { ScoreBar } from "../components/ScoreBar";
@@ -40,8 +40,16 @@ export function TickerDetail() {
           : await api.get<TickerResponse>(`/api/ticker/${upper}`);
         setData(resp);
         setError(null);
-      } catch {
-        setError("Failed to load ticker.");
+      } catch (e) {
+        // Phase 8c Issue C diagnostic — surface the actual status so we can
+        // tell 401/404/500 apart instead of all paths showing the same
+        // generic "Failed to load" string.
+        const detail =
+          e instanceof ApiError
+            ? `API ${e.status}${e.body ? `: ${JSON.stringify(e.body).slice(0, 200)}` : ""}`
+            : String(e);
+        console.error(`[TickerDetail] load(${upper}, refresh=${refresh}) failed:`, e);
+        setError(`Failed to load ticker (${detail})`);
       } finally {
         setLoading(false);
         setRefreshing(false);

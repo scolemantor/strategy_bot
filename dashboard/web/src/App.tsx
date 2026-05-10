@@ -1,3 +1,4 @@
+import { useEffect } from "react";
 import { Navigate, Route, Routes } from "react-router-dom";
 import { ProtectedRoute } from "./components/ProtectedRoute";
 import { Layout } from "./components/Layout";
@@ -8,6 +9,7 @@ import { TickerDetail } from "./pages/TickerDetail";
 import { ScanHistory } from "./pages/ScanHistory";
 import { Notifications } from "./pages/Notifications";
 import { Settings } from "./pages/Settings";
+import { useWatchlistStore } from "./stores/watchlistStore";
 
 // Phase 8c routing changes:
 //   /          → temporarily redirects to /signals (will become Watchlist
@@ -21,6 +23,17 @@ import { Settings } from "./pages/Settings";
 //                will be hard-removed AFTER 8e once new Watchlist landing
 //                is stable for a few days (Sean's conservative ask)
 export default function App() {
+  // Phase 8c Issue B diagnostic — log initial Zustand store state on App mount
+  useEffect(() => {
+    const s = useWatchlistStore.getState();
+    console.log(
+      `[App.mount] watchlistStore initial: ` +
+        `initialized=${s.initialized} loading=${s.loading} ` +
+        `entries=${s.entries.length} tickers=${[...s.tickers].join(",")} ` +
+        `error=${s.error ?? "null"}`,
+    );
+  }, []);
+
   return (
     <Routes>
       <Route path="/login" element={<Login />} />

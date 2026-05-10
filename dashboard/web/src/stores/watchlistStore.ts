@@ -63,6 +63,13 @@ export const useWatchlistStore = create<WatchlistState>((set, get) => ({
       const resp = await api.get<WatchlistEntriesResponse>(
         "/api/watchlist/entries",
       );
+      // Phase 8c Issue B diagnostic
+      const sample = (resp.entries ?? []).slice(0, 5).map((e) => e.ticker);
+      console.log(
+        `[WLStore] fetchAll OK: entries=${resp.entries?.length ?? "undefined"} ` +
+          `sample=${JSON.stringify(sample)} ` +
+          `last_technical_scan=${resp.last_technical_scan ?? "null"}`,
+      );
       set({
         entries: resp.entries,
         tickers: tickersFromEntries(resp.entries),
@@ -72,6 +79,11 @@ export const useWatchlistStore = create<WatchlistState>((set, get) => ({
       });
     } catch (e) {
       const msg = e instanceof ApiError ? `API ${e.status}` : String(e);
+      // Phase 8c Issue B diagnostic
+      console.warn(
+        `[WLStore] fetchAll FAILED: ${msg}`,
+        e instanceof ApiError ? { status: e.status, body: e.body } : e,
+      );
       set({ loading: false, error: msg, initialized: true });
       // Don't toast 401 — ProtectedRoute handles re-auth on next nav
       if (!(e instanceof ApiError && e.status === 401)) {
