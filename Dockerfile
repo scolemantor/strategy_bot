@@ -35,7 +35,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     cron \
     curl \
     ca-certificates \
-    git \
     tini \
     tzdata \
     && rm -rf /var/lib/apt/lists/*

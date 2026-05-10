@@ -50,13 +50,13 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 
-# pandas-ta install via git+ URL in requirements.txt — the PyPI release
-# is abandoned. Wrap import so a build-time install failure (network
-# issue at git clone, transient DNS, etc) doesn't crash the scanner
-# package on import. Scanner gracefully degrades to a no-op + clear
-# error message if TA_AVAILABLE is False at runtime.
+# pandas-ta-classic — actively-maintained fork of the abandoned pandas-ta.
+# Drop-in replacement under a different package name (`pandas_ta_classic`
+# vs `pandas_ta`). Wrap import so a hypothetical install failure doesn't
+# crash the scanner package on import — scanner degrades to a no-op +
+# clear error message if TA_AVAILABLE is False at runtime.
 try:
-    import pandas_ta as ta
+    import pandas_ta_classic as ta
     TA_AVAILABLE = True
     TA_IMPORT_ERROR = None
 except Exception as _ta_err:  # ImportError or any compat issue
@@ -483,9 +483,9 @@ class TechnicalOverlayScanner(Scanner):
         # blowup.
         if not TA_AVAILABLE:
             log.warning(
-                f"pandas-ta not available ({TA_IMPORT_ERROR}); "
+                f"pandas-ta-classic not available ({TA_IMPORT_ERROR}); "
                 "technical_overlay scanner disabled. Reinstall via "
-                "`pip install git+https://github.com/twopirllc/pandas-ta.git@development`"
+                "`pip install pandas-ta-classic>=0.4.47`"
             )
             return ScanResult(
                 scanner_name=self.name,
