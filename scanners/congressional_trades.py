@@ -99,9 +99,19 @@ QUIVER_API_KEY_ENV = "QUIVER_API_KEY"
 # pages of this size; if it ignores `page_size`, we get the full array. A
 # response of EXACTLY this length triggers the truncation warning.
 QUIVER_PAGE_SIZE = 10000
-# TickerType values that the scanner accepts as common stock. Anything
-# else (options, ETFs, bonds, crypto, blank) is dropped before clustering.
-COMMON_STOCK_TICKER_TYPES = frozenset({"CS", "ST"})
+# TickerType values that the scanner accepts as common stock. Verified
+# against a 50-record live sample 2026-05-09. Three accepted forms:
+#   "Stock" (Quiver's common label, normalized to "STOCK" after .upper())
+#   "ST"   (abbreviated stock)
+#   "CS"   (common stock — older/spec form)
+# Anything else is dropped — known non-equity values include:
+#   "HN"  hedge fund / private partnership (sample record's Description
+#         was "CAPITAL CALL OF $40,112.60" — capital calls only happen
+#         with private fund investments, not public equity)
+#   "OP"  options
+#   "MF"  mutual funds
+#   "BD"  bonds
+COMMON_STOCK_TICKER_TYPES = frozenset({"STOCK", "ST", "CS"})
 
 USER_AGENT = "OakStrategyBot research"
 REQUEST_TIMEOUT = 60
@@ -238,8 +248,14 @@ class CongressionalTradesScanner(Scanner):
         log.info(
             f"Loaded {len(raw_records)} total records "
             f"(house={house_count}, senate={senate_count}; "
-            f"filed range {oldest_filed} -> {latest_filed}; "
             f"{in_window_count} within cutoff window {cutoff} -> {run_date})"
+        )
+        # Dedicated diagnostic line — fixed format so we can grep across
+        # historical runs to track whether Quiver's server-side date
+        # filtering remains effective or drifts.
+        log.info(
+            f"Date filter result: requested {cutoff} to {run_date}, "
+            f"got {oldest_filed} to {latest_filed}"
         )
 
         trades: List[CongressionalTrade] = []
@@ -507,10 +523,12 @@ class CongressionalTradesScanner(Scanner):
             amount_min=amount_min,
             amount_max=amount_max,
             asset_description=asset_desc,
-            # Quiver `Transaction` values include "Purchase", "Sale",
-            # "Sale (Full)", "Sale (Partial)", "Exchange". Treat anything
-            # containing "purchase" as a buy.
-            is_purchase=("purchase" in txn_type_raw),
+            # Quiver `Transaction` values verified live 2026-05-09:
+            # "Purchase", "Sale", "Sale (Partial)", "Sale (Full)". Use
+            # exact-match (not substring "purchase in ...") so a
+            # hypothetical future "Repurchase" or "Pre-purchase" doesn't
+            # accidentally count.
+            is_purchase=(txn_type_raw == "purchase"),
             is_high_signal_member=self._is_high_signal(member),
             raw_amount=trade_size_raw,
             ticker_type=ticker_type,
