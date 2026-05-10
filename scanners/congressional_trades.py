@@ -1,4 +1,4 @@
-"""Congressional trades scanner via Financial Modeling Prep (FMP) API.
+"""Congressional trades scanner via Quiver Quantitative API.
 
 Surfaces tickers being bought by Members of Congress under STOCK Act
 disclosures. The signal is two-pronged:
@@ -11,35 +11,42 @@ disclosures. The signal is two-pronged:
 Academic basis: Ziobrowski et al. (2004, 2011) documented Senate and House
 trading edge over the market.
 
-DATA SOURCE (Phase 7 hotfix, 2026-05-09): the original community S3 feeds
-(house-stock-watcher-data / senate-stock-watcher-data) both went 403
-Forbidden in early 2026 and the GitHub mirror is stale (last commit 2021).
-We migrated to Financial Modeling Prep's congressional trading endpoints:
+DATA SOURCE (Phase 7 hotfix history):
+  - Original: housestockwatcher.com / senatestockwatcher.com S3 feeds.
+    Both went 403 Forbidden in early 2026; GitHub mirror stale since 2021.
+  - First replacement attempt: FMP `/api/v4/senate-disclosure-rss-feed` —
+    turned out to be paid-tier-locked despite docs implying free tier.
+  - Second replacement attempt: Finnhub `/stock/congressional-trading` —
+    also premium-only.
+  - Current: Quiver Quantitative — confirmed-paid but transparent
+    ($30/mo Hobbyist tier covers Congress Trading dataset). One unified
+    endpoint covers both chambers.
 
-  - House:  /api/v4/senate-disclosure-rss-feed (FMP confusingly names the
-            House firehose 'senate-disclosure'; this is intentional, not a
-            typo — verified against FMP's docs, May 2026)
-  - Senate: /api/v4/senate-trading-rss-feed
+Endpoint: `https://api.quiverquant.com/beta/live/congresstrading`
+Auth:     `Authorization: Token <QUIVER_API_KEY>` header
+Schema:   one JSON array. Each record has `Representative`, `Ticker`,
+          `Transaction` (Purchase/Sale/...), `Range` (STOCK Act bracket
+          string like "$1,001 - $15,000"), `House` (chamber discriminator,
+          values "Senate" or "House"), `ReportDate`, `TransactionDate`,
+          `Party`, plus `Amount`, `Description`, `last_modified`.
+Pagination: none on the live endpoint — full current snapshot in one call.
 
-Requires an FMP_API_KEY env var. Free tier is 250 calls/day + 500 MB/30-day
-bandwidth, plenty for one daily scan that fetches ~5-10 pages per chamber.
-Sign up at https://site.financialmodelingprep.com/developer/docs/pricing
-and add `FMP_API_KEY=...` to .env. Without the env var set, the scanner
-returns an empty ScanResult with a clear "API key not configured" note —
-it does NOT raise, so scan.py all keeps working.
+Sign up at https://api.quiverquant.com/pricing and add
+`QUIVER_API_KEY=...` to .env. Without the env var set the scanner returns
+an empty ScanResult with a clear "API key not configured" note — does NOT
+raise, so scan.py all keeps working.
 
 Look-ahead protection (backtest mode): we filter by `disclosure_date <=
-as_of_date`, NEVER `transaction_date`. The 45-day legal disclosure window
-means a transaction_date filter would surface trades that weren't yet public
-on the historical date being replayed.
+as_of_date` (Quiver's `ReportDate`), NEVER `transaction_date`. The 45-day
+legal disclosure window means a transaction_date filter would surface
+trades that weren't yet public on the historical date being replayed.
 
 Honest limits:
   - 45-day disclosure lag means signals are stale by definition.
-  - Members file late or amend after deadlines.
-  - Spouse/family member trades (`owner` field = Spouse/Joint) are disclosed
-    but harder to attribute; we count them under the member's name.
-  - FMP tickers come straight from the filing — sometimes blank, sometimes
-    `"--"`, sometimes class-B variants. We normalize as best we can.
+  - Spouse/family member trades are disclosed but harder to attribute;
+    we count them under the member's name as listed.
+  - Quiver's `Ticker` field is normalized but occasionally blank for
+    non-equity assets — those rows get dropped at the common-stock filter.
 """
 from __future__ import annotations
 
@@ -61,17 +68,13 @@ from .base import Scanner, ScanResult, empty_result
 
 log = logging.getLogger(__name__)
 
-# FMP (Financial Modeling Prep) congressional-trading firehose endpoints.
-# Both return JSON arrays of trade records, newest disclosure first,
-# paginated via ?page=N (0-indexed) and optional ?limit=N (max 1000,
-# default ~100). FMP confusingly names the House firehose
-# 'senate-disclosure-rss-feed' — verified, not a typo.
-FMP_BASE = "https://financialmodelingprep.com/api/v4"
-FMP_HOUSE_FEED = f"{FMP_BASE}/senate-disclosure-rss-feed"
-FMP_SENATE_FEED = f"{FMP_BASE}/senate-trading-rss-feed"
-FMP_API_KEY_ENV = "FMP_API_KEY"
-FMP_PAGE_LIMIT = 100  # default page size; FMP allows up to 1000
-FMP_MAX_PAGES = 30    # safety cap; with 30-day lookback we typically need 5-10
+# Quiver Quantitative live congressional-trading endpoint. One call returns
+# both chambers' current snapshot (no pagination). The `House` field on
+# each record discriminates ("Senate" vs "House"). Auth via
+# `Authorization: Token <KEY>` header — verified against Quiver's official
+# Python wrapper at https://github.com/Quiver-Quantitative/python-api .
+QUIVER_FEED_URL = "https://api.quiverquant.com/beta/live/congresstrading"
+QUIVER_API_KEY_ENV = "QUIVER_API_KEY"
 
 USER_AGENT = "OakStrategyBot research"
 REQUEST_TIMEOUT = 60
@@ -162,51 +165,43 @@ class CongressionalTradesScanner(Scanner):
         log.info(f"Lookback window: {self.lookback_days} days (by disclosure_date)")
         log.info(f"High-signal members configured: {len(HIGH_SIGNAL_MEMBERS)}")
 
-        api_key = os.environ.get(FMP_API_KEY_ENV)
+        api_key = os.environ.get(QUIVER_API_KEY_ENV)
         if not api_key:
             log.warning(
-                f"{FMP_API_KEY_ENV} env var not set; congressional_trades scanner is "
-                "disabled. Sign up at https://site.financialmodelingprep.com/developer/docs/pricing "
-                "(free tier: 250 calls/day) and add the key to .env."
+                f"{QUIVER_API_KEY_ENV} env var not set; congressional_trades scanner "
+                "is disabled. Sign up at https://api.quiverquant.com/pricing "
+                "(Hobbyist tier $30/mo includes Congress Trading) and add the key to .env."
             )
             return ScanResult(
                 scanner_name=self.name,
                 run_date=run_date,
                 candidates=pd.DataFrame(columns=["ticker", "score", "reason"]),
-                notes=[f"{FMP_API_KEY_ENV} not configured; scanner disabled (no error)."],
+                notes=[f"{QUIVER_API_KEY_ENV} not configured; scanner disabled (no error)."],
             )
-
-        cutoff = run_date - timedelta(days=self.lookback_days)
 
         try:
-            house_raw = self._fetch_fmp_feed(
-                FMP_HOUSE_FEED, "fmp_house.json", api_key, cutoff,
-            )
+            raw_records = self._fetch_quiver_feed(api_key)
         except Exception as e:
-            log.exception("Failed to fetch FMP House feed")
-            house_raw = []
-            log.warning("Continuing with Senate-only data (House fetch failed)")
+            log.exception("Failed to fetch Quiver congressional trading feed")
+            return empty_result(self.name, run_date, error=f"quiver feed: {e}")
 
-        try:
-            senate_raw = self._fetch_fmp_feed(
-                FMP_SENATE_FEED, "fmp_senate.json", api_key, cutoff,
-            )
-        except Exception as e:
-            log.exception("Failed to fetch FMP Senate feed")
-            return empty_result(self.name, run_date, error=f"senate feed: {e}")
-
-        log.info(f"Loaded {len(house_raw)} house records, {len(senate_raw)} senate records")
+        # Quiver returns one combined array; split on the `House` field.
+        # Values are literally "House" and "Senate" (verified via probe).
+        house_count = sum(1 for r in raw_records if str(r.get("House", "")).lower() == "house")
+        senate_count = sum(1 for r in raw_records if str(r.get("House", "")).lower() == "senate")
+        log.info(
+            f"Loaded {len(raw_records)} total records "
+            f"(house={house_count}, senate={senate_count})"
+        )
 
         trades: List[CongressionalTrade] = []
-        for r in house_raw:
-            t = self._parse_fmp_record(r, "house")
-            if t is not None:
-                trades.append(t)
-        for r in senate_raw:
-            t = self._parse_fmp_record(r, "senate")
+        for r in raw_records:
+            t = self._parse_quiver_record(r)
             if t is not None:
                 trades.append(t)
         log.info(f"Parsed {len(trades)} trades total")
+
+        cutoff = run_date - timedelta(days=self.lookback_days)
 
         in_window = [
             t for t in trades
@@ -307,82 +302,62 @@ class CongressionalTradesScanner(Scanner):
             ],
         )
 
-    def _fetch_fmp_feed(
-        self, url: str, cache_name: str, api_key: str, cutoff: date,
-    ) -> List[Dict]:
-        """Fetch FMP firehose endpoint, paginated newest-first. Stops as
-        soon as the oldest disclosure_date in a page falls before `cutoff`,
-        so we don't waste API budget pulling years of history. Cached for
-        CACHE_TTL_HOURS as the merged-pages JSON.
+    def _fetch_quiver_feed(self, api_key: str) -> List[Dict]:
+        """Fetch Quiver's live congresstrading endpoint. Returns the full
+        current snapshot (both chambers, no pagination). Cached for
+        CACHE_TTL_HOURS to avoid burning API budget on repeated runs.
 
-        Returns the unparsed list of raw FMP records covering at least the
-        disclosure window [cutoff, today]."""
-        cache_path = CACHE_DIR / cache_name
+        Quiver's auth uses `Authorization: Token <key>` (verified against
+        their official Python wrapper). Probe tests showed 401 with a
+        clear DRF-style error body when the key is missing or invalid."""
+        cache_path = CACHE_DIR / "quiver_congresstrading.json"
         if cache_path.exists():
             age_hours = (time.time() - cache_path.stat().st_mtime) / 3600
             if age_hours < CACHE_TTL_HOURS:
-                log.debug(f"Using cached {cache_name} ({age_hours:.1f}h old)")
+                log.debug(f"Using cached Quiver feed ({age_hours:.1f}h old)")
                 return json.loads(cache_path.read_text())
 
-        all_records: List[Dict] = []
-        for page in range(FMP_MAX_PAGES):
-            params = {"page": page, "limit": FMP_PAGE_LIMIT, "apikey": api_key}
-            log.info(f"Fetching {cache_name} page {page} from {url}")
-            resp = requests.get(
-                url,
-                params=params,
-                headers={"User-Agent": USER_AGENT},
-                timeout=REQUEST_TIMEOUT,
+        log.info(f"Fetching Quiver feed from {QUIVER_FEED_URL}")
+        resp = requests.get(
+            QUIVER_FEED_URL,
+            headers={
+                "Authorization": f"Token {api_key}",
+                "User-Agent": USER_AGENT,
+                "Accept": "application/json",
+            },
+            timeout=REQUEST_TIMEOUT,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        if not isinstance(data, list):
+            raise ValueError(
+                f"Unexpected Quiver response shape: {type(data).__name__}; "
+                f"expected list. Body head: {str(data)[:200]}"
             )
-            resp.raise_for_status()
-            page_data = resp.json()
-            if not isinstance(page_data, list):
-                log.warning(
-                    f"  Unexpected response shape from {url}: "
-                    f"{type(page_data).__name__}; stopping pagination"
-                )
-                break
-            if not page_data:
-                log.debug(f"  Page {page} empty; end of feed")
-                break
-            all_records.extend(page_data)
-
-            # Newest-first: check if oldest in this page is already past cutoff
-            page_dates = [
-                self._parse_date(r.get("disclosureDate")) for r in page_data
-            ]
-            page_dates = [d for d in page_dates if d is not None]
-            if page_dates and min(page_dates) < cutoff:
-                log.debug(
-                    f"  Page {page} oldest disclosure {min(page_dates)} < "
-                    f"cutoff {cutoff}; stopping pagination "
-                    f"(have {len(all_records)} records)"
-                )
-                break
 
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
-        cache_path.write_text(json.dumps(all_records))
-        return all_records
+        cache_path.write_text(json.dumps(data))
+        return data
 
-    def _parse_fmp_record(self, raw: Dict, chamber: str) -> Optional[CongressionalTrade]:
-        """Parse one FMP congressional trade record. Schema is identical
-        across chambers (House and Senate firehoses return the same fields).
+    def _parse_quiver_record(self, raw: Dict) -> Optional[CongressionalTrade]:
+        """Parse one Quiver congresstrading record.
 
-        Field reference (verified 2026-05-09):
-          symbol, disclosureDate, transactionDate, firstName, lastName,
-          office, district, owner, assetDescription, assetType, type,
-          amount, comment, link
+        Field reference (verified via real probe 2026-05-09):
+          Representative, BioGuideID, ReportDate, TransactionDate, Ticker,
+          Transaction (Purchase / Sale (Partial) / Sale (Full) / Exchange),
+          Range (STOCK Act bracket string), House (Senate / House), Amount,
+          Party (R / D), last_modified, TickerType, Description,
+          ExcessReturn, PriceChange, SPYChange.
         """
         try:
-            ticker = (raw.get("symbol") or "").strip().upper()
-            first = (raw.get("firstName") or "").strip()
-            last = (raw.get("lastName") or "").strip()
-            member = f"{first} {last}".strip()
-            txn_type_raw = (raw.get("type") or "").strip().lower()
-            asset_desc = (raw.get("assetDescription") or "").strip()
-            amount_raw = (raw.get("amount") or "").strip()
-            txn_date = self._parse_date(raw.get("transactionDate"))
-            disc_date = self._parse_date(raw.get("disclosureDate"))
+            ticker = (raw.get("Ticker") or "").strip().upper()
+            member = (raw.get("Representative") or "").strip()
+            txn_type_raw = (raw.get("Transaction") or "").strip().lower()
+            asset_desc = (raw.get("Description") or "").strip()
+            amount_raw = (raw.get("Range") or raw.get("Amount") or "").strip()
+            txn_date = self._parse_date(raw.get("TransactionDate"))
+            disc_date = self._parse_date(raw.get("ReportDate"))
+            chamber_raw = str(raw.get("House", "")).strip().lower()
         except (AttributeError, TypeError):
             return None
 
@@ -390,6 +365,14 @@ class CongressionalTradesScanner(Scanner):
             return None
         if ticker in ("--", "N/A", ""):
             ticker = ""
+
+        # `House` field literally contains "House" or "Senate"; normalize.
+        if chamber_raw == "senate":
+            chamber = "senate"
+        elif chamber_raw == "house":
+            chamber = "house"
+        else:
+            chamber = "unknown"
 
         amount_min, amount_max = self._parse_amount(amount_raw)
         return CongressionalTrade(
@@ -402,8 +385,9 @@ class CongressionalTradesScanner(Scanner):
             amount_min=amount_min,
             amount_max=amount_max,
             asset_description=asset_desc,
-            # FMP `type` values: "Purchase", "Sale (Full)", "Sale (Partial)",
-            # "Exchange". We treat anything containing "purchase" as a buy.
+            # Quiver `Transaction` values: "Purchase", "Sale (Full)",
+            # "Sale (Partial)", "Exchange". Treat anything containing
+            # "purchase" as a buy; matches the prior FMP/S3 logic.
             is_purchase=("purchase" in txn_type_raw),
             is_high_signal_member=self._is_high_signal(member),
             raw_amount=amount_raw,
