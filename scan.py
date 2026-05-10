@@ -19,6 +19,7 @@ import time
 import traceback
 from datetime import date
 from pathlib import Path
+from typing import List, Optional
 
 import pandas as pd
 
@@ -48,14 +49,31 @@ def cmd_list() -> None:
     print()
 
 
-def cmd_run(name: str, run_date: date, output_dir: Path, apply_filter: bool = True) -> dict:
+def cmd_run(
+    name: str,
+    run_date: date,
+    output_dir: Path,
+    apply_filter: bool = True,
+    ticker_override: Optional[List[str]] = None,
+) -> dict:
     """Run a single scanner.
 
     Returns {count, errors, runtime_seconds} for cmd_all aggregation. The
     `python scan.py run NAME` CLI path discards the return value.
+
+    Phase 8c Issue 2: ticker_override (when set, comma-list of symbols
+    from --tickers CLI flag) is forwarded to scanners that opt in via
+    a `set_ticker_override(list)` method. Currently only honored by
+    technical_overlay — other scanners ignore it. Lets the dashboard
+    fire `python scan.py run technical_overlay --tickers AKAM` after
+    a watchlist add so the just-added ticker has technical data within
+    ~10-20s instead of waiting up to 15 min for the next */15 cron tick.
     """
     log = logging.getLogger("scan")
     scanner = get_scanner(name)
+    if ticker_override and hasattr(scanner, "set_ticker_override"):
+        scanner.set_ticker_override(ticker_override)
+        log.info(f"Ticker override active: {', '.join(ticker_override)}")
     log.info(f"Running scanner: {scanner}")
 
     start_t = time.perf_counter()
@@ -250,6 +268,16 @@ def main() -> None:
         action="store_true",
         help="Bypass the investability filter and write raw scanner output.",
     )
+    p_run.add_argument(
+        "--tickers",
+        type=lambda s: [t.strip().upper() for t in s.split(",") if t.strip()],
+        default=None,
+        help=(
+            "Override the scanner's default ticker source. Comma-separated, "
+            "e.g. --tickers AKAM,PATK,SRAD. Currently honored by "
+            "technical_overlay only (other scanners ignore it)."
+        ),
+    )
 
     # All subcommand
     p_all = subparsers.add_parser("all", help="Run all available scanners")
@@ -303,7 +331,11 @@ def main() -> None:
         cmd_list()
     elif args.command == "run":
         apply_filter = not getattr(args, "no_filter", False)
-        cmd_run(args.name, args.date, output_dir, apply_filter=apply_filter)
+        cmd_run(
+            args.name, args.date, output_dir,
+            apply_filter=apply_filter,
+            ticker_override=getattr(args, "tickers", None),
+        )
     elif args.command == "all":
         apply_filter = not getattr(args, "no_filter", False)
         cmd_all(args.date, output_dir, apply_filter=apply_filter)

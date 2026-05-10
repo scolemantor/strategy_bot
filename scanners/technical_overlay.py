@@ -566,6 +566,19 @@ class TechnicalOverlayScanner(Scanner):
 
     BARS_FETCH_DAYS = DEFAULT_BARS_FETCH_DAYS
 
+    def __init__(self):
+        super().__init__()
+        # Phase 8c Issue 2: optional override populated via
+        # set_ticker_override(). When set, scan only those tickers
+        # instead of reading the watchlist. Used by the dashboard
+        # POST /api/watchlist/entries handler to fire a fast scan
+        # for a just-added ticker.
+        self._ticker_override: Optional[List[str]] = None
+
+    def set_ticker_override(self, tickers: List[str]) -> None:
+        cleaned = [t.strip().upper() for t in tickers if t and t.strip()]
+        self._ticker_override = cleaned or None
+
     def run(self, run_date: date) -> ScanResult:
         # Graceful degradation if pandas-ta failed to install. Returns
         # an empty (non-error) result with a clear note — scan pipeline
@@ -587,23 +600,27 @@ class TechnicalOverlayScanner(Scanner):
                 ],
             )
 
-        # Phase 8a: read watchlist tickers (loaded fresh each run, so a
-        # ticker added via dashboard at minute T appears in the next */15
-        # cron fire). Skips conflict / top-N filtering — every entry on
-        # the watchlist gets a technical breakdown.
-        try:
-            entries = read_all_entries()
-        except Exception as e:
-            log.exception("Failed to read watchlist entries")
-            return empty_result(self.name, run_date, error=f"watchlist read: {e}")
-
-        tickers = [e["ticker"] for e in entries if e.get("ticker")]
-        log.info(
-            f"Watchlist has {len(tickers)} ticker(s): "
-            f"{', '.join(tickers) or '(empty)'}"
-        )
+        # Ticker source: --tickers override (Phase 8c Issue 2) wins,
+        # otherwise read all watchlist entries.
+        if self._ticker_override:
+            tickers = list(self._ticker_override)
+            log.info(
+                f"Ticker override active — scanning {len(tickers)} ticker(s) "
+                f"instead of watchlist: {', '.join(tickers)}"
+            )
+        else:
+            try:
+                entries = read_all_entries()
+            except Exception as e:
+                log.exception("Failed to read watchlist entries")
+                return empty_result(self.name, run_date, error=f"watchlist read: {e}")
+            tickers = [e["ticker"] for e in entries if e.get("ticker")]
+            log.info(
+                f"Watchlist has {len(tickers)} ticker(s): "
+                f"{', '.join(tickers) or '(empty)'}"
+            )
         if not tickers:
-            log.info("Empty watchlist — nothing to analyze")
+            log.info("No tickers to analyze")
             return empty_result(self.name, run_date)
 
         try:

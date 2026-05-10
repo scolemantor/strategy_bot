@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import json
 import logging
+import subprocess
 from datetime import date
 from pathlib import Path
 from typing import Optional
@@ -122,6 +123,30 @@ def get_watchlist_entries(_: User = Depends(current_user)) -> WatchlistEntriesRe
     )
 
 
+def _fire_background_technical_scan(ticker: str) -> None:
+    """Phase 8c Issue 2: fire a non-blocking background subprocess that
+    runs technical_overlay --tickers <ticker>. Frontend polls every 60s
+    and the technical breakdown appears on the next poll (typically
+    within 30s) instead of waiting up to 15 min for the next */15 cron.
+
+    Best-effort: any subprocess failure is logged at WARNING level but
+    does NOT propagate — the watchlist add already succeeded; failing
+    the API response over a backgroundable scan would be wrong."""
+    try:
+        subprocess.Popen(
+            ["python", "scan.py", "run", "technical_overlay", "--tickers", ticker],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            # Don't specify cwd — inherit from parent (uvicorn runs in /app
+            # via entrypoint.sh in production; local dev runs from repo root).
+        )
+    except Exception as e:
+        log.warning(
+            f"Background technical_overlay --tickers {ticker} failed to spawn: "
+            f"{e} (next */15 cron will pick it up)"
+        )
+
+
 @router.post(
     "/entries",
     response_model=WatchlistEntry,
@@ -151,6 +176,11 @@ def post_watchlist_entry(
             status.HTTP_409_CONFLICT,
             f"{payload.ticker.upper()} already on watchlist",
         )
+    # Phase 8c Issue 2: fire background technical scan for the just-added
+    # ticker so its data appears in the dashboard within ~30s instead of
+    # waiting up to 15 min for the next */15 cron tick.
+    _fire_background_technical_scan(payload.ticker.upper())
+
     # Hydrate response with full read shape (defaults applied + technicals)
     return _entry_to_response(after, payload.ticker.upper())
 
