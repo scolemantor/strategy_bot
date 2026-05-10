@@ -22,14 +22,24 @@ DATA SOURCE (Phase 7 hotfix history):
     ($30/mo Hobbyist tier covers Congress Trading dataset). One unified
     endpoint covers both chambers.
 
-Endpoint: `https://api.quiverquant.com/beta/live/congresstrading`
-Auth:     `Authorization: Token <QUIVER_API_KEY>` header
-Schema:   one JSON array. Each record has `Representative`, `Ticker`,
-          `Transaction` (Purchase/Sale/...), `Range` (STOCK Act bracket
-          string like "$1,001 - $15,000"), `House` (chamber discriminator,
-          values "Senate" or "House"), `ReportDate`, `TransactionDate`,
-          `Party`, plus `Amount`, `Description`, `last_modified`.
-Pagination: none on the live endpoint — full current snapshot in one call.
+Endpoint: `https://api.quiverquant.com/beta/bulk/congresstrading`
+Auth:     `Authorization: Bearer <QUIVER_API_KEY>` header (per Quiver's
+          OpenAPI spec; their official Python wrapper uses the legacy
+          `Token` form which is also accepted)
+Schema:   one JSON array. Each record has `Representative`, `BioGuideID`,
+          `Ticker`, `Transaction` (Purchase/Sale/...), `Range` (STOCK Act
+          bracket string), `Amount`, `District`, `House` (chamber
+          discriminator: "Representatives" or "Senate"), `Party`,
+          `TickerType` ("CS" or "ST" for common stock; other values for
+          non-equity), `ReportDate`, `TransactionDate`, `last_modified`,
+          plus performance fields `ExcessReturn`, `PriceChange`,
+          `SPYChange` (Quiver's per-trade alpha-vs-SPY tracking).
+Filters:  defensive `date_from` + `date_to` + `page=1` + `page_size=10000`
+          query params — if Quiver honors them we save bandwidth, if not
+          we still get the full array and client-side cutoff filter applies.
+TickerType: hard filter to CS/ST common stock only. Empty/missing
+          TickerType drops the record (V2 schema is well-populated; a
+          blank field signals non-equity).
 
 Sign up at https://api.quiverquant.com/pricing and add
 `QUIVER_API_KEY=...` to .env. Without the env var set the scanner returns
@@ -68,13 +78,19 @@ from .base import Scanner, ScanResult, empty_result
 
 log = logging.getLogger(__name__)
 
-# Quiver Quantitative live congressional-trading endpoint. One call returns
-# both chambers' current snapshot (no pagination). The `House` field on
-# each record discriminates ("Senate" vs "House"). Auth via
-# `Authorization: Token <KEY>` header — verified against Quiver's official
-# Python wrapper at https://github.com/Quiver-Quantitative/python-api .
-QUIVER_FEED_URL = "https://api.quiverquant.com/beta/live/congresstrading"
+# Quiver Quantitative bulk congressional-trading endpoint. Date-filterable
+# and paginated per Quiver's OpenAPI spec. Returns both chambers in one
+# response; the `House` field discriminates ("Senate" or "Representatives").
+# Auth via `Authorization: Bearer <KEY>` header.
+QUIVER_FEED_URL = "https://api.quiverquant.com/beta/bulk/congresstrading"
 QUIVER_API_KEY_ENV = "QUIVER_API_KEY"
+# Defensive per-page request size. If the server honors pagination, we get
+# pages of this size; if it ignores `page_size`, we get the full array. A
+# response of EXACTLY this length triggers the truncation warning.
+QUIVER_PAGE_SIZE = 10000
+# TickerType values that the scanner accepts as common stock. Anything
+# else (options, ETFs, bonds, crypto, blank) is dropped before clustering.
+COMMON_STOCK_TICKER_TYPES = frozenset({"CS", "ST"})
 
 USER_AGENT = "OakStrategyBot research"
 REQUEST_TIMEOUT = 60
@@ -108,6 +124,17 @@ NON_COMMON_STOCK_HINTS = (
 )
 
 
+def _coerce_float(v) -> Optional[float]:
+    """Defensive float-coerce for Quiver's optional numeric fields.
+    Returns None for None / "" / non-numeric; preserves explicit 0.0."""
+    if v is None or v == "":
+        return None
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
 @dataclass
 class CongressionalTrade:
     ticker: str
@@ -122,6 +149,11 @@ class CongressionalTrade:
     is_purchase: bool
     is_high_signal_member: bool
     raw_amount: str
+    # Phase 7 hotfix (Quiver migration): new fields with defaults so any
+    # cached pre-migration JSON deserializes cleanly via from_dict.
+    ticker_type: str = ""
+    excess_return: Optional[float] = None
+    price_change: Optional[float] = None
 
     @property
     def amount_midpoint(self) -> float:
@@ -179,15 +211,21 @@ class CongressionalTradesScanner(Scanner):
                 notes=[f"{QUIVER_API_KEY_ENV} not configured; scanner disabled (no error)."],
             )
 
+        cutoff = run_date - timedelta(days=self.lookback_days)
+
         try:
-            raw_records = self._fetch_quiver_feed(api_key)
+            raw_records = self._fetch_quiver_feed(api_key, cutoff, run_date)
         except Exception as e:
             log.exception("Failed to fetch Quiver congressional trading feed")
             return empty_result(self.name, run_date, error=f"quiver feed: {e}")
 
         # Quiver returns one combined array; split on the `House` field.
-        # Values are literally "House" and "Senate" (verified via probe).
-        house_count = sum(1 for r in raw_records if str(r.get("House", "")).lower() == "house")
+        # V2 schema values are "Representatives" / "Senate" (V1 was "House" /
+        # "Senate"); _parse_quiver_record normalizes both to "house"/"senate".
+        house_count = sum(
+            1 for r in raw_records
+            if str(r.get("House", "")).lower() in ("house", "representatives")
+        )
         senate_count = sum(1 for r in raw_records if str(r.get("House", "")).lower() == "senate")
         log.info(
             f"Loaded {len(raw_records)} total records "
@@ -195,13 +233,21 @@ class CongressionalTradesScanner(Scanner):
         )
 
         trades: List[CongressionalTrade] = []
+        ticker_type_dropped = 0
         for r in raw_records:
             t = self._parse_quiver_record(r)
-            if t is not None:
-                trades.append(t)
-        log.info(f"Parsed {len(trades)} trades total")
-
-        cutoff = run_date - timedelta(days=self.lookback_days)
+            if t is None:
+                continue
+            # Hard TickerType filter: V2 schema populates this consistently;
+            # missing/non-equity values mean the trade is not in our universe.
+            if t.ticker_type not in COMMON_STOCK_TICKER_TYPES:
+                ticker_type_dropped += 1
+                continue
+            trades.append(t)
+        log.info(
+            f"Parsed {len(trades)} common-stock trades "
+            f"(dropped {ticker_type_dropped} non-CS/ST records)"
+        )
 
         in_window = [
             t for t in trades
@@ -258,6 +304,20 @@ class CongressionalTradesScanner(Scanner):
 
             members_list = "; ".join(sorted({t.member_name for t in group if t.member_name}))
 
+            # Phase 7 hotfix: Quiver returns per-trade alpha vs SPY
+            # (ExcessReturn) and absolute price change since the trade
+            # (PriceChange). Aggregate across the cluster as a confidence
+            # signal — DATA only for now, not folded into the score
+            # formula until a separate meta_ranker commit weights it.
+            er_values = [t.excess_return for t in group if t.excess_return is not None]
+            pc_values = [t.price_change for t in group if t.price_change is not None]
+            avg_excess_return = (
+                round(sum(er_values) / len(er_values), 4) if er_values else None
+            )
+            avg_price_change = (
+                round(sum(pc_values) / len(pc_values), 4) if pc_values else None
+            )
+
             if has_high_signal and n_members >= self.MIN_CLUSTER_MEMBERS:
                 reason = (
                     f"{n_members} members + high-signal buyer, "
@@ -280,6 +340,8 @@ class CongressionalTradesScanner(Scanner):
                 "has_high_signal_member": has_high_signal,
                 "members_list": members_list,
                 "chambers": chambers,
+                "avg_excess_return": avg_excess_return,
+                "avg_price_change": avg_price_change,
                 "score": round(score, 2),
                 "reason": reason,
             })
@@ -302,26 +364,43 @@ class CongressionalTradesScanner(Scanner):
             ],
         )
 
-    def _fetch_quiver_feed(self, api_key: str) -> List[Dict]:
-        """Fetch Quiver's live congresstrading endpoint. Returns the full
-        current snapshot (both chambers, no pagination). Cached for
-        CACHE_TTL_HOURS to avoid burning API budget on repeated runs.
+    def _fetch_quiver_feed(
+        self, api_key: str, cutoff: date, run_date: date,
+    ) -> List[Dict]:
+        """Fetch Quiver's bulk congresstrading endpoint. Sends defensive
+        date_from/date_to + page/page_size params per the OpenAPI spec —
+        if the server honors them, we save bandwidth; if not, we still
+        get the full array and the caller's client-side cutoff filter
+        applies. Cached for CACHE_TTL_HOURS.
 
-        Quiver's auth uses `Authorization: Token <key>` (verified against
-        their official Python wrapper). Probe tests showed 401 with a
-        clear DRF-style error body when the key is missing or invalid."""
-        cache_path = CACHE_DIR / "quiver_congresstrading.json"
+        Pagination: not looped in this version. The official Python
+        wrapper hits this endpoint with no params and parses a flat array,
+        suggesting one-shot returns the full set. If the truncation
+        diagnostic (response length == QUIVER_PAGE_SIZE) fires AND the
+        latest TransactionDate seen falls before our window, follow-up
+        commit needs a real pagination loop.
+
+        Auth: `Authorization: Bearer <key>` (Quiver also accepts the
+        legacy `Token` form for back-compat)."""
+        cache_path = CACHE_DIR / "quiver_bulk_congresstrading.json"
         if cache_path.exists():
             age_hours = (time.time() - cache_path.stat().st_mtime) / 3600
             if age_hours < CACHE_TTL_HOURS:
-                log.debug(f"Using cached Quiver feed ({age_hours:.1f}h old)")
+                log.debug(f"Using cached Quiver bulk feed ({age_hours:.1f}h old)")
                 return json.loads(cache_path.read_text())
 
-        log.info(f"Fetching Quiver feed from {QUIVER_FEED_URL}")
+        params = {
+            "date_from": cutoff.isoformat(),
+            "date_to": run_date.isoformat(),
+            "page": 1,
+            "page_size": QUIVER_PAGE_SIZE,
+        }
+        log.info(f"Fetching Quiver bulk feed from {QUIVER_FEED_URL} params={params}")
         resp = requests.get(
             QUIVER_FEED_URL,
+            params=params,
             headers={
-                "Authorization": f"Token {api_key}",
+                "Authorization": f"Bearer {api_key}",
                 "User-Agent": USER_AGENT,
                 "Accept": "application/json",
             },
@@ -335,19 +414,36 @@ class CongressionalTradesScanner(Scanner):
                 f"expected list. Body head: {str(data)[:200]}"
             )
 
+        # Truncation diagnostic: if the response is exactly page_size,
+        # we may have hit a server-side cap. Check the latest TransactionDate
+        # to tell if we got the full window or only the most recent slice.
+        if len(data) == QUIVER_PAGE_SIZE:
+            txn_dates = [self._parse_date(r.get("TransactionDate")) for r in data]
+            txn_dates = [d for d in txn_dates if d is not None]
+            latest_txn = max(txn_dates) if txn_dates else None
+            oldest_txn = min(txn_dates) if txn_dates else None
+            within_window = oldest_txn is not None and oldest_txn <= cutoff
+            log.warning(
+                f"Quiver returned exactly {QUIVER_PAGE_SIZE} records — "
+                f"may be truncated. latest_txn={latest_txn} oldest_txn={oldest_txn} "
+                f"cutoff={cutoff} within_window={within_window}. "
+                f"If within_window=False, pagination loop is required."
+            )
+
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
         cache_path.write_text(json.dumps(data))
         return data
 
     def _parse_quiver_record(self, raw: Dict) -> Optional[CongressionalTrade]:
-        """Parse one Quiver congresstrading record.
+        """Parse one Quiver bulk congresstrading record (V2 schema).
 
-        Field reference (verified via real probe 2026-05-09):
+        Field reference (verified against Quiver OpenAPI spec May 2026):
           Representative, BioGuideID, ReportDate, TransactionDate, Ticker,
           Transaction (Purchase / Sale (Partial) / Sale (Full) / Exchange),
-          Range (STOCK Act bracket string), House (Senate / House), Amount,
-          Party (R / D), last_modified, TickerType, Description,
-          ExcessReturn, PriceChange, SPYChange.
+          Range (STOCK Act bracket string), Amount, District,
+          House (Representatives / Senate), Party (R / D),
+          TickerType (CS = common stock, ST = stock, others non-equity),
+          last_modified, ExcessReturn, PriceChange, SPYChange.
         """
         try:
             ticker = (raw.get("Ticker") or "").strip().upper()
@@ -358,6 +454,7 @@ class CongressionalTradesScanner(Scanner):
             txn_date = self._parse_date(raw.get("TransactionDate"))
             disc_date = self._parse_date(raw.get("ReportDate"))
             chamber_raw = str(raw.get("House", "")).strip().lower()
+            ticker_type = (raw.get("TickerType") or "").strip().upper()
         except (AttributeError, TypeError):
             return None
 
@@ -366,15 +463,22 @@ class CongressionalTradesScanner(Scanner):
         if ticker in ("--", "N/A", ""):
             ticker = ""
 
-        # `House` field literally contains "House" or "Senate"; normalize.
+        # `House` field is "Representatives" or "Senate" in V2 schema
+        # ("House" in V1). Normalize both forms.
         if chamber_raw == "senate":
             chamber = "senate"
-        elif chamber_raw == "house":
+        elif chamber_raw in ("house", "representatives"):
             chamber = "house"
         else:
             chamber = "unknown"
 
         amount_min, amount_max = self._parse_amount(amount_raw)
+
+        # Performance fields — Quiver's per-trade alpha tracking.
+        # Float-coerce defensively; missing/null → None.
+        excess_return = _coerce_float(raw.get("ExcessReturn"))
+        price_change = _coerce_float(raw.get("PriceChange"))
+
         return CongressionalTrade(
             ticker=ticker,
             member_name=member,
@@ -387,10 +491,13 @@ class CongressionalTradesScanner(Scanner):
             asset_description=asset_desc,
             # Quiver `Transaction` values: "Purchase", "Sale (Full)",
             # "Sale (Partial)", "Exchange". Treat anything containing
-            # "purchase" as a buy; matches the prior FMP/S3 logic.
+            # "purchase" as a buy.
             is_purchase=("purchase" in txn_type_raw),
             is_high_signal_member=self._is_high_signal(member),
             raw_amount=amount_raw,
+            ticker_type=ticker_type,
+            excess_return=excess_return,
+            price_change=price_change,
         )
 
     @staticmethod
