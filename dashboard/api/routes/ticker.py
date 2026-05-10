@@ -1,9 +1,13 @@
 """Ticker detail routes.
 
 GET /api/ticker/{symbol}     — cached read: yfinance fundamentals + reverse
-                                index + recent scanner signals
+                                index + recent scanner signals + technical
+                                breakdown from data_cache/technical/
 POST /api/ticker/{symbol}/refresh — re-fetches yfinance fundamentals,
                                     overwrites cache, returns same shape
+POST /api/ticker/{symbol}/rescan  — fires background technical_overlay
+                                    scan for this ticker (best-effort,
+                                    same Popen pattern as watchlist add)
 """
 from __future__ import annotations
 
@@ -11,7 +15,7 @@ import json
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 from fastapi import APIRouter, Depends
 
@@ -20,12 +24,29 @@ from dashboard.api.data_loader import (
 )
 from dashboard.api.deps import current_user
 from dashboard.api.models import User
+from dashboard.api.routes._scan_helpers import fire_background_technical_scan
 
 router = APIRouter(prefix="/api/ticker", tags=["ticker"])
 
 FUNDAMENTALS_CACHE_DIR = Path("data_cache/yfinance_fundamentals")
+TECHNICAL_DETAIL_DIR = Path("data_cache/technical")
 
 log = logging.getLogger(__name__)
+
+
+def _load_technical_breakdown(symbol: str) -> Optional[dict]:
+    """Phase 8c polish: load full technical breakdown JSON for the symbol.
+    Same shape as the per-ticker JSON written by scanners/technical_overlay.
+    Returns None if file missing or parse fails — never raises."""
+    path = TECHNICAL_DETAIL_DIR / f"{symbol.upper()}.json"
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as e:
+        log.debug(f"failed to load technical breakdown {path}: {e}")
+        return None
+    return data if isinstance(data, dict) else None
 
 
 def _read_fundamentals(symbol: str) -> dict:
@@ -88,12 +109,24 @@ def _build_response(symbol: str) -> dict:
         "scanner_history": scanner_history,
         "recent_signals": recent_signals,
         "cached_at": fund.get("fetched_at"),
+        "technical_breakdown": _load_technical_breakdown(sym),
     }
 
 
 @router.get("/{symbol}")
 def get_ticker(symbol: str, _: User = Depends(current_user)) -> dict:
     return _build_response(symbol)
+
+
+@router.post("/{symbol}/rescan")
+def rescan_ticker(symbol: str, _: User = Depends(current_user)) -> dict:
+    """Phase 8c polish: fire a background technical_overlay scan for this
+    ticker. Same fire-and-forget Popen pattern as watchlist auto-scan.
+    Frontend polls GET /api/ticker/{symbol} until technical_breakdown.
+    computed_at moves forward, then re-renders."""
+    sym = symbol.upper()
+    scan_triggered = fire_background_technical_scan(sym)
+    return {"ticker": sym, "scan_triggered": scan_triggered}
 
 
 @router.post("/{symbol}/refresh")

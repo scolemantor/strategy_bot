@@ -80,6 +80,13 @@ export interface TickerResponse {
   scanner_history: TickerScannerHit[];
   recent_signals: TickerSignal[];
   cached_at: string | null;
+  // Phase 8c polish: full technical breakdown (null if no scan yet)
+  technical_breakdown: TechnicalDetail | null;
+}
+
+export interface TickerRescanResponse {
+  ticker: string;
+  scan_triggered: boolean;
 }
 
 export interface HistoryEntry {
@@ -123,31 +130,72 @@ export interface SettingsResponse {
 
 // --- Phase 8a watchlist + technical types (mirror dashboard/api/schemas.py) ---
 
+export interface TechnicalTrend {
+  ma_20: number | null;
+  ma_50: number | null;
+  ma_200: number | null;
+  above_ma_20: boolean | null;
+  above_ma_50: boolean | null;
+  above_ma_200: boolean | null;
+  ma_20_slope: string;
+  ma_50_slope: string;
+  ma_200_slope: string;
+  golden_cross_recent: boolean;
+  death_cross_recent: boolean;
+}
+
+export interface TechnicalMomentum {
+  rsi_14: number | null;
+  rsi_class: string | null;
+  macd_hist: number | null;
+  macd_above_signal: boolean | null;
+  macd_recent_cross: string | null;
+  roc_5d: number | null;
+  roc_10d: number | null;
+  roc_20d: number | null;
+}
+
+export interface TechnicalVolume {
+  last_volume: number | null;
+  vol_ma_20: number | null;
+  vol_ratio_20d: number | null;
+  obv_trend_30d: string | null;
+  up_down_vol_ratio_30d: number | null;
+}
+
+export interface TechnicalVolatility {
+  atr_14: number | null;
+  bb_lower: number | null;
+  bb_upper: number | null;
+  bb_position: number | null;
+  hv_30d_annualized: number | null;
+}
+
+export interface TechnicalKeyLevels {
+  high_30d: number | null;
+  low_30d: number | null;
+  high_52w: number | null;
+  low_52w: number | null;
+  pct_from_52w_high: number | null;
+  pct_from_52w_low: number | null;
+}
+
 export interface TechnicalDetail {
   ticker: string;
   computed_at: string;
   last_close: number;
   setup_score: number | null;
   reason: string | null;
+  // Phase 8c Issue 3 narration. null when SDK missing, ANTHROPIC_API_KEY
+  // unset, data_sufficiency != "full", or API call failed.
+  narrative: string | null;
   data_sufficiency: "full" | "partial" | "minimal";
   bar_count: number;
-  trend: {
-    ma_20: number | null;
-    ma_50: number | null;
-    ma_200: number | null;
-    above_ma_20: boolean | null;
-    above_ma_50: boolean | null;
-    above_ma_200: boolean | null;
-    ma_20_slope: string;
-    ma_50_slope: string;
-    ma_200_slope: string;
-    golden_cross_recent: boolean;
-    death_cross_recent: boolean;
-  };
-  momentum: Record<string, unknown>;
-  volume: Record<string, unknown>;
-  volatility: Record<string, unknown>;
-  key_levels: Record<string, unknown>;
+  trend: TechnicalTrend;
+  momentum: TechnicalMomentum;
+  volume: TechnicalVolume;
+  volatility: TechnicalVolatility;
+  key_levels: TechnicalKeyLevels;
 }
 
 export interface WatchlistEntry {

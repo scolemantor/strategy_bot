@@ -129,6 +129,13 @@ class TechnicalDetail(BaseModel):
     last_close: float
     setup_score: Optional[float] = None
     reason: Optional[str] = None
+    # Phase 8c Issue 3 narration. None when SDK missing, API key unset,
+    # data_sufficiency != "full", or API call failed.
+    narrative: Optional[str] = None
+    # "full" | "partial" | "minimal" — used by the UI to explain why
+    # narrative is missing for non-full tickers.
+    data_sufficiency: Optional[str] = None
+    bar_count: Optional[int] = None
     trend: dict
     momentum: dict
     volume: dict
@@ -163,6 +170,15 @@ class TickerResponse(BaseModel):
     scanner_history: List[TickerScannerHit]
     recent_signals: List[TickerSignal]
     cached_at: Optional[str] = None
+    # Phase 8c polish: full technical breakdown (None if no scan yet
+    # for this ticker). Same shape as TechnicalDetail.
+    technical_breakdown: Optional[TechnicalDetail] = None
+
+
+class TickerRescanResponse(BaseModel):
+    """Response for POST /api/ticker/{symbol}/rescan."""
+    ticker: str
+    scan_triggered: bool
 
 
 class HistoryEntry(BaseModel):
