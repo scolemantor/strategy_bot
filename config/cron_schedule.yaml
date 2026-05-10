@@ -37,6 +37,12 @@ jobs:
     timeout_minutes: 5
     description: "Daily log gzip + retention pass"
 
+  - name: technical_overlay
+    schedule: "*/15 9-16 * * 1-5"  # every 15 min, 9 AM-4 PM ET, Mon-Fri (covers pre-market through close)
+    command: "python scan.py run technical_overlay"
+    timeout_minutes: 5
+    description: "Phase 8a: refresh technical setup-quality scores for top 10 master_ranked tickers (intraday only — not part of scan_all)"
+
 dead_man_switch:
   enabled: true
   ping_interval_minutes: 60
