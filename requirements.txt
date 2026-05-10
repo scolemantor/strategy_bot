@@ -24,3 +24,8 @@ ruamel.yaml>=0.18.0
 # import name (handled in scanners/technical_overlay.py).
 # Source: https://github.com/xgboosted/pandas-ta-classic
 pandas-ta-classic>=0.4.47
+# Phase 8c Issue 3 — plain-language technical narration via Claude API.
+# Optional dep: scanner falls back to None narrative if anthropic SDK
+# missing OR ANTHROPIC_API_KEY not in env OR API call fails. Cost per
+# call ≈ $0.001 (claude-haiku-4-5).
+anthropic>=0.40.0

@@ -68,6 +68,7 @@ from src.config import load_credentials
 from src.data import fetch_bars
 
 from .base import Scanner, ScanResult, empty_result
+from .technical_narrator import generate_narrative
 from .watchlist import read_all_entries
 
 log = logging.getLogger(__name__)
@@ -666,6 +667,12 @@ class TechnicalOverlayScanner(Scanner):
             setup_score, reason = _compute_setup_score(metrics)
             metrics["setup_score"] = setup_score
             metrics["reason"] = reason
+
+            # Phase 8c Issue 3: plain-language narration via Claude API.
+            # Best-effort — generate_narrative returns None if SDK
+            # missing, ANTHROPIC_API_KEY unset, data_sufficiency !=
+            # 'full', or API call fails. Frontend falls back to `reason`.
+            metrics["narrative"] = generate_narrative(metrics, ticker)
 
             # Per-ticker JSON detail file
             detail_path = TECHNICAL_DETAIL_DIR / f"{ticker}.json"
