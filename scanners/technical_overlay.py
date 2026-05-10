@@ -73,8 +73,15 @@ from .watchlist import read_all_entries
 log = logging.getLogger(__name__)
 
 TECHNICAL_DETAIL_DIR = Path("data_cache/technical")
-DEFAULT_BARS_FETCH_DAYS = 400  # need 252+ for 200-day MA + buffer
-MIN_BARS_FOR_ANALYSIS = 200    # require at least 200 daily bars per ticker
+DEFAULT_BARS_FETCH_DAYS = 400  # request 252+ for 200-day MA + buffer
+
+# Phase 8a fix Issue 1: lowered from 200 to 30 so recent IPOs (e.g. BLLN
+# with 126 days of history) still produce a partial analysis. Each
+# indicator yields None if its specific lookback isn't satisfied; the
+# score formula skips dimensions that aren't computable.
+MIN_BARS_FOR_ANALYSIS = 30
+SUFFICIENT_FOR_FULL = 200      # >= this many bars → 200dma + golden cross reliable
+SUFFICIENT_FOR_PARTIAL = 50    # 50-199 bars → 50dma + most short-term reliable
 
 
 # --- Helpers (indicator-tier classifications) ---
@@ -205,7 +212,14 @@ def _compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
 
 def _extract_metrics(df: pd.DataFrame, ticker: str) -> Optional[dict]:
     """Pull the latest-row metric snapshot from an indicator-augmented df.
-    Returns None if df has fewer than MIN_BARS_FOR_ANALYSIS rows."""
+    Returns None if df has fewer than MIN_BARS_FOR_ANALYSIS rows.
+
+    Phase 8a fix Issue 1: lowered MIN_BARS_FOR_ANALYSIS from 200 to 30 so
+    recent IPOs still produce a partial breakdown. Each indicator yields
+    None if its specific lookback isn't satisfied (e.g. 50dma needs 50+
+    bars, 200dma needs 200+); the score formula skips dimensions that
+    aren't computable. The data_sufficiency field documents what's
+    available so downstream UIs can render appropriately."""
     if df.empty or len(df) < MIN_BARS_FOR_ANALYSIS:
         return None
 
@@ -218,13 +232,16 @@ def _extract_metrics(df: pd.DataFrame, ticker: str) -> Optional[dict]:
     ma_50 = _safe_float(latest.get("ma_50"))
     ma_200 = _safe_float(latest.get("ma_200"))
 
-    above_ma_20 = ma_20 is not None and last_close > ma_20
-    above_ma_50 = ma_50 is not None and last_close > ma_50
-    above_ma_200 = ma_200 is not None and last_close > ma_200
+    # Tristate: True (above), False (below), None (insufficient data).
+    # Score formula treats None as no-adjustment — neither rewards nor
+    # penalizes when we genuinely don't know the long-term trend.
+    above_ma_20 = (last_close > ma_20) if ma_20 is not None else None
+    above_ma_50 = (last_close > ma_50) if ma_50 is not None else None
+    above_ma_200 = (last_close > ma_200) if ma_200 is not None else None
 
-    ma_20_slope = _slope_class(df["ma_20"], lookback=5)
-    ma_50_slope = _slope_class(df["ma_50"], lookback=10)
-    ma_200_slope = _slope_class(df["ma_200"], lookback=20)
+    ma_20_slope = _slope_class(df.get("ma_20"), lookback=5)
+    ma_50_slope = _slope_class(df.get("ma_50"), lookback=10)
+    ma_200_slope = _slope_class(df.get("ma_200"), lookback=20)
 
     golden_cross = _detect_cross(df["ma_50"], df["ma_200"], window=30, direction="above")
     death_cross = _detect_cross(df["ma_50"], df["ma_200"], window=30, direction="below")
@@ -304,10 +321,24 @@ def _extract_metrics(df: pd.DataFrame, ticker: str) -> Optional[dict]:
         else None
     )
 
+    # Data sufficiency classification (Phase 8a Issue 1):
+    #   full    → >= 200 bars (all indicators including 200dma reliable)
+    #   partial → 50-199 bars (50dma + short-term reliable; 200dma null)
+    #   minimal → 30-49 bars (only short-term indicators meaningful)
+    n_bars = len(df)
+    if n_bars >= SUFFICIENT_FOR_FULL:
+        data_sufficiency = "full"
+    elif n_bars >= SUFFICIENT_FOR_PARTIAL:
+        data_sufficiency = "partial"
+    else:
+        data_sufficiency = "minimal"
+
     return {
         "ticker": ticker,
         "computed_at": datetime.now(timezone.utc).isoformat(),
         "last_close": last_close,
+        "data_sufficiency": data_sufficiency,
+        "bar_count": n_bars,
         "trend": {
             "ma_20": ma_20,
             "ma_50": ma_50,
@@ -357,107 +388,166 @@ def _extract_metrics(df: pd.DataFrame, ticker: str) -> Optional[dict]:
 
 
 def _compute_setup_score(metrics: dict) -> Tuple[float, str]:
-    """Compute 0-100 setup quality score. Returns (score, summary_reason)."""
+    """Compute 0-100 setup quality score. Returns (score, summary_reason).
+
+    Phase 8a fix Issue 3: redesigned formula. Previous version had
+    rewards summing to ~127 (well above 100) which meant penalties up
+    to -27 still hit the 0-100 clamp at 100 — an "overbought RSI on a
+    perfect chart" landed at 100 indistinguishable from a clean entry.
+
+    New formula:
+      - Score starts at 0 (not 50 baseline).
+      - Each of the 4 dimensions contributes 0 to its budget:
+          Trend 35, Momentum 25, Volume 20, Setup 20.
+      - Per-dimension reward is min(reward_pts, dimension_budget).
+        Perfect setup tops out at exactly 100 from rewards alone.
+      - PENALTIES subtract from the total AFTER reward summation, then
+        the result is clamped to 0-100. Perfect chart + RSI 75 ≈ 95;
+        perfect chart + RSI 85 ≈ 85.
+      - Tristate above_ma_X handling: True/False adjust, None
+        (insufficient data, e.g. recent IPO) doesn't adjust either way.
+    """
     trend = metrics["trend"]
     momentum = metrics["momentum"]
     volume = metrics["volume"]
     volatility = metrics["volatility"]
     key_levels = metrics["key_levels"]
 
-    score = 50.0  # neutral baseline; positives push up, negatives down
+    score = 0.0
     reason_parts: List[str] = []
 
-    # TREND (35 pts)
-    if trend["above_ma_20"]:
-        score += 4
-    if trend["above_ma_50"]:
-        score += 6
-    if trend["above_ma_200"]:
-        score += 8
+    # === REWARDS (capped at dimension budgets) ===
+
+    # TREND (35 pts max)
+    trend_pts = 0
+    if trend["above_ma_20"] is True:
+        trend_pts += 4
+    if trend["above_ma_50"] is True:
+        trend_pts += 6
+    if trend["above_ma_200"] is True:
+        trend_pts += 10
         reason_parts.append("above 200d")
-    else:
+    if trend["ma_20_slope"] == "rising":
+        trend_pts += 3
+    if trend["ma_50_slope"] == "rising":
+        trend_pts += 4
+    if trend["ma_200_slope"] == "rising":
+        trend_pts += 3
+    if trend["golden_cross_recent"]:
+        trend_pts += 5
+        reason_parts.append("golden cross")
+    score += min(trend_pts, 35)
+
+    # MOMENTUM (25 pts max)
+    mom_pts = 0
+    rsi = momentum["rsi_14"]
+    if rsi is not None:
+        if 40 <= rsi <= 70:
+            mom_pts += 12
+            reason_parts.append(f"RSI {rsi:.0f} healthy")
+        elif 30 <= rsi < 40:
+            mom_pts += 6
+            reason_parts.append(f"RSI {rsi:.0f} weak")
+    if momentum["macd_above_signal"]:
+        mom_pts += 5
+    if momentum["macd_recent_cross"] == "bullish":
+        mom_pts += 8
+        reason_parts.append("MACD bull cross")
+    score += min(mom_pts, 25)
+
+    # VOLUME (20 pts max)
+    vol_pts = 0
+    vr = volume["vol_ratio_20d"]
+    if vr is not None:
+        if vr >= 1.5:
+            vol_pts += 8
+            reason_parts.append(f"vol {vr:.1f}x")
+        elif vr >= 1.0:
+            vol_pts += 4
+    if volume["obv_trend_30d"] == "rising":
+        vol_pts += 8
+        reason_parts.append("OBV rising")
+    udvr = volume["up_down_vol_ratio_30d"]
+    if udvr is not None and udvr > 1.2:
+        vol_pts += 4
+    score += min(vol_pts, 20)
+
+    # SETUP (20 pts max)
+    setup_pts = 0
+    bb_pos = volatility["bb_position"]
+    if bb_pos is not None:
+        if 0.3 <= bb_pos <= 0.7:
+            setup_pts += 10
+            reason_parts.append("BB consol")
+        elif bb_pos > 0.95:
+            setup_pts += 6
+            reason_parts.append("BB upper edge")
+    pct_high = key_levels["pct_from_52w_high"]
+    if pct_high is not None and pct_high >= -5:
+        setup_pts += 10
+        reason_parts.append(f"{abs(pct_high):.1f}% from 52w high")
+    score += min(setup_pts, 20)
+
+    # === PENALTIES (subtract from total, no dimension cap; allow score
+    # to go below dimension budgets to reflect material risks) ===
+
+    # Trend penalties
+    if trend["above_ma_20"] is False:
+        score -= 4
+    if trend["above_ma_50"] is False:
+        score -= 6
+    if trend["above_ma_200"] is False:
         score -= 12
         reason_parts.append("BELOW 200d")
-
-    if trend["ma_20_slope"] == "rising":
-        score += 3
-    elif trend["ma_20_slope"] == "falling":
+    if trend["ma_20_slope"] == "falling":
         score -= 3
-    if trend["ma_50_slope"] == "rising":
-        score += 4
-    elif trend["ma_50_slope"] == "falling":
+    if trend["ma_50_slope"] == "falling":
         score -= 4
-
-    if trend["golden_cross_recent"]:
-        score += 5
-        reason_parts.append("golden cross")
+    # Note: NO ma_200_slope_falling penalty. Redundant with the
+    # above_ma_200 False penalty + death_cross_recent — all three
+    # are symptoms of the same long-term trend break, and stacking
+    # them produced 30+ point penalties for "broken-trend with recovery
+    # signals" charts that should land in the 30-50 range, not <30.
     if trend["death_cross_recent"]:
         score -= 8
         reason_parts.append("DEATH cross")
 
-    # MOMENTUM (25 pts)
-    rsi = momentum["rsi_14"]
+    # RSI extreme penalties (Issue 3 schedule)
     if rsi is not None:
-        if 40 <= rsi <= 70:
-            score += 8
-            reason_parts.append(f"RSI {rsi:.0f} healthy")
-        elif 30 <= rsi < 40:
-            score += 4
-            reason_parts.append(f"RSI {rsi:.0f} weak")
-        elif 70 < rsi <= 80:
-            score += 2
+        if 70 < rsi <= 80:
+            score -= 5
             reason_parts.append(f"RSI {rsi:.0f} overbought")
         elif rsi > 80:
-            score -= 8
-            reason_parts.append(f"RSI {rsi:.0f} EXTREME")
-        elif rsi < 30:
-            score -= 4
+            score -= 15
+            reason_parts.append(f"RSI {rsi:.0f} EXTREME OB")
+        elif 20 <= rsi <= 30:
+            score -= 5
             reason_parts.append(f"RSI {rsi:.0f} oversold")
+        elif rsi < 20:
+            score -= 15
+            reason_parts.append(f"RSI {rsi:.0f} EXTREME OS")
 
-    if momentum["macd_above_signal"]:
-        score += 5
-    if momentum["macd_recent_cross"] == "bullish":
-        score += 6
-        reason_parts.append("MACD bull cross")
-    elif momentum["macd_recent_cross"] == "bearish":
+    # MACD bearish cross
+    if momentum["macd_recent_cross"] == "bearish":
         score -= 6
         reason_parts.append("MACD bear cross")
 
-    # VOLUME (20 pts)
-    vr = volume["vol_ratio_20d"]
-    if vr is not None:
-        if vr >= 1.5:
-            score += 8
-            reason_parts.append(f"vol {vr:.1f}x")
-        elif vr >= 1.0:
-            score += 4
-        elif vr < 0.5:
-            score -= 4
-
-    if volume["obv_trend_30d"] == "rising":
-        score += 6
-        reason_parts.append("OBV rising")
-    elif volume["obv_trend_30d"] == "falling":
+    # Volume penalties
+    if vr is not None and vr < 0.5:
+        score -= 4
+    if volume["obv_trend_30d"] == "falling":
         score -= 6
+        reason_parts.append("OBV falling")
 
-    udvr = volume["up_down_vol_ratio_30d"]
-    if udvr is not None and udvr > 1.2:
-        score += 4
-
-    # SETUP / VOLATILITY (20 pts)
-    bb_pos = volatility["bb_position"]
-    if bb_pos is not None:
-        if 0.3 <= bb_pos <= 0.7:
-            score += 5
-            reason_parts.append("BB consol")
-        elif bb_pos > 0.95:
-            score += 3
-            reason_parts.append("BB upper edge")
-
-    pct_high = key_levels["pct_from_52w_high"]
-    if pct_high is not None and pct_high >= -5:
-        score += 5
-        reason_parts.append(f"{abs(pct_high):.1f}% from 52w high")
+    # Distance-from-52w-high penalty (Sean's CRWV concern: stocks 30%+
+    # off highs shouldn't score as well as those near highs)
+    if pct_high is not None:
+        if pct_high <= -40:
+            score -= 10
+            reason_parts.append(f"{abs(pct_high):.0f}% off 52w high")
+        elif pct_high <= -20:
+            score -= 5
+            reason_parts.append(f"{abs(pct_high):.0f}% off 52w high")
 
     score = max(0.0, min(100.0, score))
     summary = ", ".join(reason_parts[:6]) or "no notable signals"

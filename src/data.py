@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 import pandas as pd
+from alpaca.data.enums import Adjustment
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame
@@ -33,6 +34,17 @@ log = logging.getLogger(__name__)
 CACHE_DIR = Path("data_cache")
 BATCH_DELAY_SEC = 0.5  # throttle Alpaca batch fetches; ~2 req/sec
 
+# Phase 8a: Alpaca's bar API defaults to RAW (unadjusted) prices. NOW (ServiceNow)
+# 5-for-1 split on 2025-12-18 was returning unadjusted historical bars,
+# producing nonsense indicators (200dma=$515 vs current=$91). Switch to ALL
+# (split + dividend adjusted) so technical indicators + 52w highs are correct.
+# This breaks cache compat — old cached parquets contain unadjusted bars and
+# would mix with new adjusted bars. CACHE_VERSION bump invalidates old caches
+# on first fetch_bars() call after deploy.
+BAR_ADJUSTMENT = Adjustment.ALL
+CACHE_VERSION_FILE = CACHE_DIR / ".cache_version"
+CACHE_VERSION = "2"  # v1 = pre-split-adjust (raw), v2 = post-split-adjust (all)
+
 
 def _rss_kb() -> int:
     """Process resident set size in KB. -1 on platforms that don't have
@@ -43,6 +55,43 @@ def _rss_kb() -> int:
         return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
     except Exception:
         return -1
+
+
+def _check_cache_version() -> None:
+    """First-call-after-deploy cache invalidation. If CACHE_VERSION_FILE
+    is missing or contains a different version string, wipe all per-symbol
+    bar parquets at the top level of CACHE_DIR. Sub-directories (yfinance
+    fundamentals, sec_form4_parsed, etc) are left untouched.
+
+    Called at the start of fetch_bars() — not at module import time so
+    test runs that don't fetch don't trigger wipes."""
+    current = None
+    try:
+        if CACHE_VERSION_FILE.exists():
+            current = CACHE_VERSION_FILE.read_text(encoding="utf-8").strip()
+    except Exception:
+        pass
+    if current == CACHE_VERSION:
+        return  # already current
+
+    if CACHE_DIR.exists():
+        wiped = 0
+        for p in CACHE_DIR.glob("*.parquet"):
+            try:
+                p.unlink()
+                wiped += 1
+            except Exception:
+                pass
+        if wiped > 0:
+            log.info(
+                f"Cache version mismatch (had={current!r}, want={CACHE_VERSION!r}); "
+                f"wiped {wiped} per-symbol bar parquet(s) — Alpaca refetch on next call"
+            )
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        CACHE_VERSION_FILE.write_text(CACHE_VERSION, encoding="utf-8")
+    except Exception as e:
+        log.warning(f"Failed to write cache version sentinel: {e}")
 
 
 def _to_alpaca_symbol(s: str) -> str:
@@ -126,6 +175,10 @@ def fetch_bars(
     errors for dotted tickers (BF-B, CWEN-A, MOG-A) and shifted the hang
     forward to batch 10. Don't re-mount adapters; let alpaca-py keep its.
     """
+    # Invalidate any unadjusted-bar cache files on first call after deploy.
+    # No-op if cache version sentinel is already current.
+    _check_cache_version()
+
     result: Dict[str, pd.DataFrame] = {}
     to_fetch: List[str] = []
 
@@ -188,6 +241,7 @@ def fetch_bars(
                 timeframe=TimeFrame.Day,
                 start=datetime.combine(start, datetime.min.time()),
                 end=datetime.combine(end, datetime.min.time()),
+                adjustment=BAR_ADJUSTMENT,
             )
             batch_bars = with_deadline(lambda: client.get_stock_bars(req), timeout=30, default=None)
             batch_dt = time.monotonic() - batch_t0
