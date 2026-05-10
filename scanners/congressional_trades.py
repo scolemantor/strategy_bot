@@ -118,19 +118,26 @@ REQUEST_TIMEOUT = 60
 CACHE_DIR = Path("data_cache/congressional_trades")
 CACHE_TTL_HOURS = 6
 
-HIGH_SIGNAL_MEMBERS: List[str] = []
-
-# Substrings that, when present in asset_description, mark the asset as
-# something other than common stock and disqualify the trade.
-NON_COMMON_STOCK_HINTS = (
-    "option", "call ", "put ",
-    "bond", "treasury", "muni", "municipal",
-    "etf", "mutual fund", "fund -", "fund (",
-    "warrant", "preferred", "convertible note",
-    "cd ", "certificate of deposit",
-    "cryptocurrency", "crypto",
-)
-
+# Members whose individual purchases fire as high-signal even without a
+# multi-member cluster. Documented top-performing congressional traders
+# (provenance: alpha-research articles + Quiver's own member-leaderboard).
+# Match is case-insensitive substring on the `Name` field. Full names work
+# when Quiver renders the same form (verified: "Greg Stanton" — no middle
+# initial). If Quiver ever renders middle initials ("Nancy P Pelosi"),
+# the contiguous-substring check would miss — replace the entry with just
+# the surname ("Pelosi") to handle both forms.
+HIGH_SIGNAL_MEMBERS: List[str] = [
+    "Nancy Pelosi",
+    "Tommy Tuberville",
+    "Dan Crenshaw",
+    "Daniel Goldman",
+    "Ron Wyden",
+    "Susan Collins",
+    "Mark Green",
+    "Earl Blumenauer",
+    "Pat Fallon",
+    "Josh Gottheimer",
+]
 
 def _coerce_float(v) -> Optional[float]:
     """Defensive float-coerce for Quiver's optional numeric fields.
@@ -193,7 +200,6 @@ class CongressionalTradesScanner(Scanner):
 
     DEFAULT_LOOKBACK_DAYS = 30
     MIN_CLUSTER_MEMBERS = 2
-    MIN_HIGH_SIGNAL_AMOUNT = 50_000
     HIGH_SIGNAL_BONUS = 50
 
     def __init__(self, lookback_days: Optional[int] = None):
@@ -285,13 +291,17 @@ class CongressionalTradesScanner(Scanner):
         ]
         log.info(f"Disclosure-date filter ({cutoff} to {run_date}): {len(trades)} -> {len(in_window)}")
 
+        # Purchase + has-ticker filter. Note: we do NOT also filter on
+        # asset_description substring — TickerType already classified
+        # common-stock vs not earlier in the parser (and the substring
+        # check was dropping ~99/106 valid records because Quiver's
+        # Description field is null for most rows, and `_is_common_stock("")`
+        # returned False).
         purchases = [
             t for t in in_window
-            if t.is_purchase
-            and t.ticker
-            and self._is_common_stock(t.asset_description)
+            if t.is_purchase and t.ticker
         ]
-        log.info(f"Purchase + common-stock filter: {len(in_window)} -> {len(purchases)}")
+        log.info(f"Purchase + has-ticker filter: {len(in_window)} -> {len(purchases)}")
 
         if not purchases:
             return empty_result(self.name, run_date)
@@ -304,10 +314,12 @@ class CongressionalTradesScanner(Scanner):
         for ticker, group in by_ticker.items():
             distinct_members = {t.member_name.strip().lower() for t in group if t.member_name}
             n_members = len(distinct_members)
-            has_high_signal = any(
-                t.is_high_signal_member and t.amount_midpoint >= self.MIN_HIGH_SIGNAL_AMOUNT
-                for t in group
-            )
+            # Any purchase by a member on HIGH_SIGNAL_MEMBERS fires as
+            # high-signal regardless of dollar size. (Earlier code gated
+            # on a $50k MIN_HIGH_SIGNAL_AMOUNT, but the named members'
+            # alpha is documented across all trade sizes and they often
+            # buy in $1k-$15k bracket; the gate suppressed real signal.)
+            has_high_signal = any(t.is_high_signal_member for t in group)
 
             if n_members < self.MIN_CLUSTER_MEMBERS and not has_high_signal:
                 continue
@@ -556,13 +568,6 @@ class CongressionalTradesScanner(Scanner):
             except ValueError:
                 continue
         return None
-
-    @staticmethod
-    def _is_common_stock(asset_description: str) -> bool:
-        if not asset_description:
-            return False
-        low = asset_description.lower()
-        return not any(hint in low for hint in NON_COMMON_STOCK_HINTS)
 
     @staticmethod
     def _is_high_signal(member_name: str) -> bool:
