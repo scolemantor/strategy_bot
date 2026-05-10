@@ -57,6 +57,79 @@ class WatchlistResponse(BaseModel):
     members: List[WatchlistMember]
 
 
+# --- Phase 8a: extended watchlist + technical schemas ---
+
+class WatchlistEntry(BaseModel):
+    """Extended Phase 8a entry shape returned by GET /api/watchlist/entries."""
+    ticker: str
+    tier: int = 2
+    position_size: Optional[int] = None
+    entry_price: Optional[float] = None
+    stop_loss: Optional[float] = None
+    target_price: Optional[float] = None
+    notes: str = ""
+    auto_added: bool = False
+    added_at: str = ""
+    last_modified: str = ""
+    # Legacy fields preserved for transition period
+    added_date: str = ""
+    reason: str = ""
+    category: str = "general"
+    # Latest technical scan, if available (None if no scan yet for this ticker)
+    latest_technicals: Optional[dict] = None
+
+
+class WatchlistEntriesResponse(BaseModel):
+    entries: List[WatchlistEntry]
+    last_technical_scan: Optional[str] = None
+
+
+class WatchlistAddRequest(BaseModel):
+    ticker: str = Field(..., min_length=1, max_length=10)
+    reason: str = ""
+    source: str = "dashboard"  # "dashboard" | "cli" | "auto"
+    tier: int = Field(2, ge=1, le=3)
+    notes: str = ""
+    category: str = "general"
+    position_size: Optional[int] = Field(None, ge=0)
+    entry_price: Optional[float] = Field(None, gt=0)
+    stop_loss: Optional[float] = Field(None, gt=0)
+    target_price: Optional[float] = Field(None, gt=0)
+
+
+class WatchlistRemoveRequest(BaseModel):
+    ticker: str = Field(..., min_length=1, max_length=10)
+    source: str = "dashboard"
+
+
+class WatchlistUpdateRequest(BaseModel):
+    """Partial update — only fields you want to change. Audit fields
+    (added_at, last_modified) cannot be updated client-side."""
+    tier: Optional[int] = Field(None, ge=1, le=3)
+    position_size: Optional[int] = Field(None, ge=0)
+    entry_price: Optional[float] = Field(None, gt=0)
+    stop_loss: Optional[float] = Field(None, gt=0)
+    target_price: Optional[float] = Field(None, gt=0)
+    notes: Optional[str] = None
+    reason: Optional[str] = None
+    category: Optional[str] = None
+
+
+class TechnicalDetail(BaseModel):
+    """Full per-ticker technical breakdown — shape mirrors the JSON the
+    technical_overlay scanner writes to data_cache/technical/<TICKER>.json."""
+    ticker: str
+    computed_at: str
+    last_close: float
+    setup_score: Optional[float] = None
+    reason: Optional[str] = None
+    trend: dict
+    momentum: dict
+    volume: dict
+    volatility: dict
+    key_levels: dict
+
+
 class TickerMeta(BaseModel):
     symbol: str
     name: Optional[str] = None

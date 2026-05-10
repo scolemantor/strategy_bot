@@ -1,8 +1,15 @@
 """Technical overlay scanner — Phase 8a backend.
 
-Scans the top N (default 10) tickers from the most recent master_ranked.csv
-(excluding conflicts) and computes a comprehensive technical setup-quality
-score plus per-ticker metric breakdown.
+Scans EVERY ticker on the watchlist (loaded fresh each run from
+config/watchlist.yaml — newly-added tickers picked up within 15 min) and
+computes a comprehensive technical setup-quality score plus per-ticker
+metric breakdown.
+
+Architecture note (Phase 8a refactor 2026-05-10): the original commit
+(61b3506) read top-10 from master_ranked.csv. The reworked architecture
+makes WATCHLIST the work surface — technical analysis runs on tickers
+the user has expressed conviction about, not arbitrary scanner output.
+master_ranked is a discovery feed surfaced separately at /signals.
 
 Two intended schedules (configured separately in cron_schedule.yaml):
   - */15 9-16 * * 1-5: every 15 min during market hours, weekdays
@@ -10,12 +17,12 @@ Two intended schedules (configured separately in cron_schedule.yaml):
 
 Outputs:
   scan_output/<run_date>/technical_overlay.csv
-      flat per-ticker summary, one row per top-N ticker, sortable by
-      setup_score in master ranking views
+      flat per-ticker summary, one row per watchlist ticker, sortable
+      by setup_score in dashboard views
   data_cache/technical/<TICKER>.json
       full metric breakdown per ticker (trend / momentum / volume /
-      volatility / key_levels). Overwritten each run; downstream
-      dashboard reads this for chart annotations.
+      volatility / key_levels). Overwritten each run; the dashboard's
+      GET /api/technical/{ticker} endpoint reads this directly.
 
 Setup quality score (0-100):
   Weighted aggregate across five dimensions:
@@ -26,10 +33,9 @@ Setup quality score (0-100):
     Penalty:           extreme RSI, below 200-day MA, falling volume
 
 Indicator math: pandas-ta. Six indicators in use: SMA, RSI, MACD, ATR,
-Bollinger Bands, OBV. If pandas-ta import fails (compat issue with newer
-pandas), swap to direct pure-pandas implementations.
+Bollinger Bands, OBV.
 
-Phase 8 scope: backend scanner only. Frontend dashboard 'Technicals' page
+Phase 8 scope: backend scanner only. Frontend Watchlist page redesign
 is Phase 8c. Excluded from scan_all (DISABLED_IN_SCAN_ALL) — runs as a
 standalone scheduled job because its cadence is intraday, not daily.
 """
@@ -49,12 +55,11 @@ from src.config import load_credentials
 from src.data import fetch_bars
 
 from .base import Scanner, ScanResult, empty_result
+from .watchlist import read_all_entries
 
 log = logging.getLogger(__name__)
 
-SCAN_OUTPUT_DIR = Path("scan_output")
 TECHNICAL_DETAIL_DIR = Path("data_cache/technical")
-DEFAULT_TOP_N = 10
 DEFAULT_BARS_FETCH_DAYS = 400  # need 252+ for 200-day MA + buffer
 MIN_BARS_FOR_ANALYSIS = 200    # require at least 200 daily bars per ticker
 
@@ -446,88 +451,36 @@ def _compute_setup_score(metrics: dict) -> Tuple[float, str]:
     return round(score, 1), summary
 
 
-# --- Master_ranked.csv loading ---
-
-def _latest_master_ranked() -> Optional[Tuple[date, Path]]:
-    """Find the most recent scan_output/<date>/master_ranked.csv."""
-    if not SCAN_OUTPUT_DIR.exists():
-        return None
-    candidates: List[Tuple[date, Path]] = []
-    for child in SCAN_OUTPUT_DIR.iterdir():
-        if not child.is_dir():
-            continue
-        try:
-            d = date.fromisoformat(child.name)
-        except ValueError:
-            continue
-        master = child / "master_ranked.csv"
-        if master.exists():
-            candidates.append((d, master))
-    if not candidates:
-        return None
-    return max(candidates, key=lambda x: x[0])
-
-
 # --- Scanner class ---
 
 class TechnicalOverlayScanner(Scanner):
     name = "technical_overlay"
     description = (
         "Technical setup quality (trend / momentum / volume / volatility) "
-        "for top N tickers from latest master_ranked.csv"
+        "for every ticker on the watchlist"
     )
     cadence = "intraday"  # intraday refreshes every 15 min, not the daily pipeline
 
-    DEFAULT_TOP_N = DEFAULT_TOP_N
     BARS_FETCH_DAYS = DEFAULT_BARS_FETCH_DAYS
 
-    def __init__(self, top_n: Optional[int] = None):
-        super().__init__()
-        self.top_n = top_n if top_n is not None else self.DEFAULT_TOP_N
-
     def run(self, run_date: date) -> ScanResult:
-        latest = _latest_master_ranked()
-        if latest is None:
-            log.warning("No master_ranked.csv found in any scan_output/<date>/ dir")
-            return empty_result(
-                self.name, run_date, error="no master_ranked.csv available",
-            )
-        master_date, master_path = latest
-        log.info(
-            f"Using master_ranked.csv from {master_date} "
-            f"(scanner run_date={run_date})"
-        )
-
+        # Phase 8a: read watchlist tickers (loaded fresh each run, so a
+        # ticker added via dashboard at minute T appears in the next */15
+        # cron fire). Skips conflict / top-N filtering — every entry on
+        # the watchlist gets a technical breakdown.
         try:
-            master = pd.read_csv(master_path)
+            entries = read_all_entries()
         except Exception as e:
-            log.exception(f"Failed to read {master_path}")
-            return empty_result(self.name, run_date, error=f"master read: {e}")
+            log.exception("Failed to read watchlist entries")
+            return empty_result(self.name, run_date, error=f"watchlist read: {e}")
 
-        if "ticker" not in master.columns or master.empty:
-            return empty_result(
-                self.name, run_date, error="master_ranked.csv has no ticker rows",
-            )
-
-        # Filter conflicts, take top N by composite_score
-        if "is_conflict" in master.columns:
-            non_conflict = master[~master["is_conflict"].astype(bool)]
-        else:
-            non_conflict = master
-        if "composite_score" in non_conflict.columns:
-            non_conflict = non_conflict.sort_values(
-                "composite_score", ascending=False,
-            )
-        top = non_conflict.head(self.top_n)
-        tickers = [
-            t for t in top["ticker"].astype(str).str.strip().str.upper().tolist()
-            if t and t not in ("?", "NAN", "NONE", "<NA>")
-        ]
+        tickers = [e["ticker"] for e in entries if e.get("ticker")]
         log.info(
-            f"Top {len(tickers)} tickers from master_ranked: "
-            f"{', '.join(tickers) or '(none)'}"
+            f"Watchlist has {len(tickers)} ticker(s): "
+            f"{', '.join(tickers) or '(empty)'}"
         )
         if not tickers:
+            log.info("Empty watchlist — nothing to analyze")
             return empty_result(self.name, run_date)
 
         try:
@@ -539,9 +492,11 @@ class TechnicalOverlayScanner(Scanner):
         start = end - timedelta(days=self.BARS_FETCH_DAYS)
 
         try:
-            # batch_size large enough that 10 tickers fit in one batch
+            # batch_size large enough that the entire watchlist fits in
+            # one batch. Watchlists are typically 5-15 tickers per spec.
             bars = fetch_bars(
-                tickers, start, end, creds, use_cache=True, batch_size=max(10, self.top_n),
+                tickers, start, end, creds, use_cache=True,
+                batch_size=max(50, len(tickers)),
             )
         except Exception as e:
             log.exception("Failed to fetch bars")
@@ -627,8 +582,7 @@ class TechnicalOverlayScanner(Scanner):
             run_date=run_date,
             candidates=df_out,
             notes=[
-                f"Source: master_ranked.csv ({master_date})",
-                f"Top N: {self.top_n} (after conflict exclusion)",
+                "Source: config/watchlist.yaml (all entries)",
                 f"Analyzed: {len(rows)} of {len(tickers)} tickers",
                 f"Per-ticker detail JSON: {TECHNICAL_DETAIL_DIR}/<TICKER>.json",
             ],
@@ -638,9 +592,9 @@ class TechnicalOverlayScanner(Scanner):
 # --- CLI compatibility ---
 
 def backtest_mode(as_of_date: date, output_dir=None) -> int:
-    """Phase 4e backtest entry point. The technical overlay relies on the
-    state of master_ranked.csv at as_of_date — falls through to live run().
-    Outputs to <output_dir>/<as_of_date>/technical_overlay.csv (defaults to
+    """Phase 4e backtest entry point. Falls through to live run() against
+    current watchlist (no historical watchlist snapshot). Outputs to
+    <output_dir>/<as_of_date>/technical_overlay.csv (defaults to
     backtest_output/)."""
     output_dir = Path(output_dir) if output_dir else Path("backtest_output")
     scanner = TechnicalOverlayScanner()

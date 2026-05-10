@@ -1,30 +1,61 @@
-"""Watchlist tracker (Phase 4d).
+"""Watchlist tracker (Phase 4d, extended in Phase 8a).
 
 Maintains a curated list of tickers you actively want to follow. Provides:
-  - add/remove/list operations on the watchlist YAML
+  - add/remove/list operations on the watchlist YAML (legacy 3-field)
+  - Phase 8a: rich CRUD with tier / position_size / entry_price / stop_loss /
+    target_price / notes / auto_added / added_at / last_modified fields
+  - File locking via scanners.watchlist_lock
+  - JSONL audit log via scanners.watchlist_audit
   - daily digest filtering scanner output to watchlist names only
   - delta detection: NEW / DROPPED / STRONGER / WEAKER vs prior day
   - STALE flag for tickers with no scanner appearances in N days
 
 Output: scan_output/<date>/watchlist_digest.csv
 
-Watchlist storage: config/watchlist.yaml. Settings (stale_days,
-delta_threshold_pct) and ticker entries (added_date, reason, category)
-all live in that file.
+Watchlist storage: config/watchlist.yaml. Each ticker entry can carry
+either the legacy 3-field schema (added_date / reason / category) or
+the extended Phase 8a schema (adds: tier, position_size, entry_price,
+stop_loss, target_price, notes, auto_added, added_at, last_modified).
+The save function writes whatever fields are present — no migration
+required; entries upgrade lazily as they're touched.
 """
 from __future__ import annotations
 
 import logging
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import pandas as pd
 
+from .watchlist_audit import append_audit_log
+from .watchlist_lock import watchlist_lock
+
 log = logging.getLogger(__name__)
 
 CONFIG_DIR = Path("config")
 WATCHLIST_PATH = CONFIG_DIR / "watchlist.yaml"
+
+# Defaults applied when read_all_entries() encounters a legacy entry
+# missing the Phase 8a fields. Existing legacy fields (added_date /
+# reason / category) are preserved.
+PHASE_8A_DEFAULTS: Dict = {
+    "tier": 2,
+    "position_size": None,
+    "entry_price": None,
+    "stop_loss": None,
+    "target_price": None,
+    "notes": "",
+    "auto_added": False,
+}
+
+# Updatable via PUT /api/watchlist/entries/{ticker} — anything else in
+# a request body is silently ignored (defends against the API client
+# clobbering audit fields like added_at).
+UPDATABLE_FIELDS = frozenset({
+    "tier", "position_size", "entry_price", "stop_loss", "target_price",
+    "notes", "reason", "category",
+})
 
 # Scanners we filter against. macro_calendar excluded (events not tickers).
 SCANNERS_TO_CHECK = [
@@ -64,19 +95,18 @@ def _load_watchlist() -> Dict:
 
 
 def _save_watchlist(data: Dict) -> None:
-    """Write watchlist YAML. Preserves comments by writing in a structured way."""
-    import yaml
+    """Write watchlist YAML. Generic key-value writer — preserves whatever
+    fields are present per ticker (legacy 3-field schema OR Phase 8a
+    extended schema OR any mix). Comments not preserved across writes."""
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
 
-    # We do a simple dump — comments aren't preserved across writes, but the
-    # structure is. Users editing manually can keep their comments; CLI writes
-    # rewrite cleanly.
     settings = data.get("settings", {})
     tickers = data.get("tickers", {})
 
     out_lines = [
-        "# Watchlist tracker (Phase 4d).",
+        "# Watchlist tracker (Phase 4d, extended Phase 8a).",
         "# Edit via CLI: python scan.py watch add/remove/list TICKER",
+        "# Or via dashboard API: POST /api/watchlist/entries",
         "",
         "settings:",
         f"  stale_days: {settings.get('stale_days', 14)}",
@@ -89,13 +119,40 @@ def _save_watchlist(data: Dict) -> None:
     else:
         for ticker, meta in sorted(tickers.items()):
             out_lines.append(f"  {ticker}:")
-            for key in ("added_date", "reason", "category"):
-                if key in meta and meta[key] is not None:
-                    val = str(meta[key]).replace('"', '\\"')
-                    out_lines.append(f'    {key}: "{val}"')
-    out_lines.append("")  # trailing newline
+            # Stable field ordering: legacy fields first (so file diffs
+            # against old version are minimal), then Phase 8a fields.
+            field_order = (
+                "added_date", "reason", "category",
+                "tier", "position_size", "entry_price", "stop_loss",
+                "target_price", "notes", "auto_added", "added_at",
+                "last_modified",
+            )
+            seen_keys = set()
+            for key in field_order:
+                if key in meta and meta[key] is not None and meta[key] != "":
+                    out_lines.append(_yaml_kv(key, meta[key]))
+                    seen_keys.add(key)
+            # Catch-all for any other keys we don't know about
+            for key, val in meta.items():
+                if key in seen_keys:
+                    continue
+                if val is None or val == "":
+                    continue
+                out_lines.append(_yaml_kv(key, val))
+    out_lines.append("")
 
     WATCHLIST_PATH.write_text("\n".join(out_lines))
+
+
+def _yaml_kv(key: str, val) -> str:
+    """Render one `    key: value` line for a ticker entry. Quotes
+    strings, leaves numbers/bools as native YAML."""
+    if isinstance(val, bool):
+        return f"    {key}: {str(val).lower()}"
+    if isinstance(val, (int, float)):
+        return f"    {key}: {val}"
+    s = str(val).replace('"', '\\"')
+    return f'    {key}: "{s}"'
 
 
 # ---------- CLI operations ----------
@@ -135,7 +192,8 @@ def remove_ticker(ticker: str) -> bool:
 
 
 def list_tickers() -> List[Dict]:
-    """Return current watchlist as a list of {ticker, added_date, reason, category} dicts."""
+    """Return current watchlist as a list of {ticker, added_date, reason, category} dicts.
+    Legacy CLI shape — for full Phase 8a entry data, use read_all_entries()."""
     data = _load_watchlist()
     out = []
     for ticker, meta in sorted(data["tickers"].items()):
@@ -146,6 +204,135 @@ def list_tickers() -> List[Dict]:
             "category": meta.get("category", ""),
         })
     return out
+
+
+# ---------- Phase 8a extended CRUD ----------
+
+def read_all_entries() -> List[Dict]:
+    """Return all watchlist entries with Phase 8a fields default-populated
+    for legacy entries. The file itself is NOT mutated — defaults are
+    applied on read; first subsequent update_entry() persists the full
+    schema for that one ticker."""
+    data = _load_watchlist()
+    out: List[Dict] = []
+    for ticker, meta in sorted(data["tickers"].items()):
+        entry: Dict = {"ticker": ticker}
+        # Phase 8a fields with defaults
+        for field, default in PHASE_8A_DEFAULTS.items():
+            entry[field] = meta.get(field, default)
+        # Date fields: prefer Phase 8a (added_at) but fall back to legacy
+        # (added_date string in YYYY-MM-DD form)
+        added_at = meta.get("added_at") or meta.get("added_date") or ""
+        last_modified = meta.get("last_modified") or added_at
+        entry["added_at"] = added_at
+        entry["last_modified"] = last_modified
+        # Preserve legacy fields for callers that still expect them
+        entry["added_date"] = meta.get("added_date", "")
+        entry["reason"] = meta.get("reason", "")
+        entry["category"] = meta.get("category", "general")
+        out.append(entry)
+    return out
+
+
+def read_entry(ticker: str) -> Optional[Dict]:
+    """Return one entry with defaults applied, or None if not present."""
+    ticker = ticker.upper().strip()
+    for entry in read_all_entries():
+        if entry["ticker"] == ticker:
+            return entry
+    return None
+
+
+def add_entry(
+    ticker: str,
+    source: str,
+    user_agent: Optional[str] = None,
+    **fields,
+) -> Tuple[bool, Optional[Dict], Optional[Dict]]:
+    """Add a new ticker with Phase 8a schema. Returns
+    (success, before_state, after_state). If ticker already exists,
+    returns (False, existing, existing) without mutation."""
+    ticker = ticker.upper().strip()
+    if not ticker:
+        return False, None, None
+
+    with watchlist_lock():
+        data = _load_watchlist()
+        if ticker in data["tickers"]:
+            existing = dict(data["tickers"][ticker])
+            return False, existing, existing
+
+        now = datetime.now(timezone.utc).isoformat()
+        entry: Dict = {
+            "added_date": date.today().isoformat(),  # legacy compat
+            "reason": fields.get("reason", ""),
+            "category": fields.get("category", "general"),
+            "tier": int(fields.get("tier", PHASE_8A_DEFAULTS["tier"])),
+            "notes": fields.get("notes", ""),
+            "auto_added": (source == "auto"),
+            "added_at": now,
+            "last_modified": now,
+        }
+        # Optional position fields — only persisted if non-null
+        for f in ("position_size", "entry_price", "stop_loss", "target_price"):
+            if fields.get(f) is not None:
+                entry[f] = fields[f]
+
+        data["tickers"][ticker] = entry
+        _save_watchlist(data)
+
+    log.info(f"  Added {ticker} to watchlist (source={source}, tier={entry['tier']})")
+    append_audit_log("add", ticker, source, None, entry, user_agent)
+    return True, None, entry
+
+
+def remove_entry(
+    ticker: str,
+    source: str,
+    user_agent: Optional[str] = None,
+) -> Tuple[bool, Optional[Dict]]:
+    """Remove a ticker. Returns (success, before_state)."""
+    ticker = ticker.upper().strip()
+    with watchlist_lock():
+        data = _load_watchlist()
+        if ticker not in data["tickers"]:
+            return False, None
+        before = dict(data["tickers"][ticker])
+        del data["tickers"][ticker]
+        _save_watchlist(data)
+
+    log.info(f"  Removed {ticker} from watchlist (source={source})")
+    append_audit_log("remove", ticker, source, before, None, user_agent)
+    return True, before
+
+
+def update_entry(
+    ticker: str,
+    fields: Dict,
+    source: str,
+    user_agent: Optional[str] = None,
+) -> Tuple[bool, Optional[Dict], Optional[Dict]]:
+    """Update fields on an existing ticker. Only UPDATABLE_FIELDS are
+    honored — other keys in `fields` are silently dropped (defends
+    against client clobbering audit fields like added_at). Returns
+    (success, before_state, after_state)."""
+    ticker = ticker.upper().strip()
+    with watchlist_lock():
+        data = _load_watchlist()
+        if ticker not in data["tickers"]:
+            return False, None, None
+        before = dict(data["tickers"][ticker])
+        for key, val in fields.items():
+            if key not in UPDATABLE_FIELDS:
+                continue
+            data["tickers"][ticker][key] = val
+        data["tickers"][ticker]["last_modified"] = datetime.now(timezone.utc).isoformat()
+        after = dict(data["tickers"][ticker])
+        _save_watchlist(data)
+
+    log.info(f"  Updated {ticker} (source={source}, fields={list(fields.keys())})")
+    append_audit_log("update", ticker, source, before, after, user_agent)
+    return True, before, after
 
 
 # ---------- Daily digest ----------
