@@ -34,7 +34,8 @@ from __future__ import annotations
 import json
 import logging
 import subprocess
-from datetime import date
+import sys
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -123,28 +124,59 @@ def get_watchlist_entries(_: User = Depends(current_user)) -> WatchlistEntriesRe
     )
 
 
-def _fire_background_technical_scan(ticker: str) -> None:
-    """Phase 8c Issue 2: fire a non-blocking background subprocess that
-    runs technical_overlay --tickers <ticker>. Frontend polls every 60s
-    and the technical breakdown appears on the next poll (typically
-    within 30s) instead of waiting up to 15 min for the next */15 cron.
+AUTO_SCAN_LOG_PATH = Path("logs/auto_scan.log")
 
-    Best-effort: any subprocess failure is logged at WARNING level but
-    does NOT propagate — the watchlist add already succeeded; failing
-    the API response over a backgroundable scan would be wrong."""
+
+def _fire_background_technical_scan(ticker: str) -> bool:
+    """Phase 8c Issue 2 + four-defense fix: fire a non-blocking background
+    subprocess that runs technical_overlay --tickers <ticker>. Frontend
+    polls every 60s and the technical breakdown appears on the next
+    poll (typically within 30s, allowing for the Anthropic narrator API
+    call from Issue 3 which adds 2-10s).
+
+    Four defenses applied:
+      1. sys.executable — guarantees the same Python that's running
+         uvicorn, no PATH lookup risk.
+      2. cwd="/app" — explicit, doesn't rely on inheritance from the
+         entrypoint's `cd ${APP_DIR}`.
+      3. start_new_session=True — detaches the child into its own
+         POSIX process group so SIGTERM to uvicorn (e.g. on container
+         restart) doesn't propagate to the in-flight scan.
+      4. stdout/stderr -> logs/auto_scan.log — append-mode log gives
+         forward visibility on every auto-scan firing. `tail -f` to
+         monitor live; previously DEVNULL was hiding silent failures.
+
+    Returns True if subprocess.Popen succeeded (process exists with a PID),
+    False if Popen itself raised. Failure does NOT propagate — the
+    watchlist add already succeeded; failing the API response over a
+    backgroundable scan would be wrong."""
     try:
-        subprocess.Popen(
-            ["python", "scan.py", "run", "technical_overlay", "--tickers", ticker],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            # Don't specify cwd — inherit from parent (uvicorn runs in /app
-            # via entrypoint.sh in production; local dev runs from repo root).
+        AUTO_SCAN_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        log_fh = open(AUTO_SCAN_LOG_PATH, "a", encoding="utf-8")
+        log_fh.write(
+            f"\n=== {datetime.now(timezone.utc).isoformat()} START "
+            f"ticker={ticker} ===\n"
         )
+        log_fh.flush()
+
+        proc = subprocess.Popen(
+            [sys.executable, "scan.py", "run", "technical_overlay", "--tickers", ticker],
+            stdout=log_fh,
+            stderr=log_fh,
+            cwd="/app",
+            start_new_session=True,
+        )
+        log.warning(  # WARNING level so it shows in default-INFO log filters
+            f"Auto-scan spawned: ticker={ticker} pid={proc.pid} "
+            f"log={AUTO_SCAN_LOG_PATH}"
+        )
+        return True
     except Exception as e:
         log.warning(
             f"Background technical_overlay --tickers {ticker} failed to spawn: "
             f"{e} (next */15 cron will pick it up)"
         )
+        return False
 
 
 @router.post(
@@ -179,10 +211,16 @@ def post_watchlist_entry(
     # Phase 8c Issue 2: fire background technical scan for the just-added
     # ticker so its data appears in the dashboard within ~30s instead of
     # waiting up to 15 min for the next */15 cron tick.
-    _fire_background_technical_scan(payload.ticker.upper())
+    scan_triggered = _fire_background_technical_scan(payload.ticker.upper())
 
     # Hydrate response with full read shape (defaults applied + technicals)
-    return _entry_to_response(after, payload.ticker.upper())
+    response = _entry_to_response(after, payload.ticker.upper())
+    # Transient hint to the frontend: True if a scan was kicked off
+    # successfully; the dashboard can show a "Scanning..." spinner on
+    # the new ticker for ~30s until the next poll picks up the technical
+    # data. Always None on GET — only set on POST response.
+    response.scan_triggered = scan_triggered
+    return response
 
 
 @router.delete("/entries/{ticker}", status_code=status.HTTP_200_OK)

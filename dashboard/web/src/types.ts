@@ -165,6 +165,12 @@ export interface WatchlistEntry {
   last_modified: string;
   added_date: string;
   latest_technicals: TechnicalDetail | null;
+  // Phase 8c Issue 2: transient hint, set ONLY on POST /entries
+  // response. true if post-add background scan spawned cleanly. Always
+  // null on GET. Frontend uses this to show a "Scanning..." spinner on
+  // the new ticker for ~30s until polling picks up populated
+  // latest_technicals.
+  scan_triggered?: boolean | null;
 }
 
 export interface WatchlistEntriesResponse {

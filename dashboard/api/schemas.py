@@ -77,6 +77,12 @@ class WatchlistEntry(BaseModel):
     category: str = "general"
     # Latest technical scan, if available (None if no scan yet for this ticker)
     latest_technicals: Optional[dict] = None
+    # Phase 8c Issue 2: transient hint set ONLY on the POST /entries
+    # response — true if the post-add background scan was successfully
+    # spawned. Frontend reads this to show a "Scanning..." spinner on
+    # the just-added ticker for ~30s until the next poll picks up the
+    # populated latest_technicals. Always None on GET responses.
+    scan_triggered: Optional[bool] = None
 
 
 class WatchlistEntriesResponse(BaseModel):
