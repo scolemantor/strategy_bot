@@ -18,4 +18,10 @@ python-jose[cryptography]>=3.3.0
 python-multipart>=0.0.9
 ruamel.yaml>=0.18.0
 # Phase 8a Technical Overlay
-pandas-ta>=0.3.14b0
+# pandas-ta's PyPI release (0.3.14b0) is abandoned and 0.4.x betas need
+# Python 3.12+. Install from GitHub development branch instead — the
+# active source against pandas 2.x. Requires `git` in the build image
+# (added to Dockerfile's apt install). Runtime ImportError fallback in
+# scanners/technical_overlay.py degrades the scanner cleanly if the git
+# install ever fails (network blip etc) — won't break scan pipeline.
+pandas-ta @ git+https://github.com/twopirllc/pandas-ta.git@development

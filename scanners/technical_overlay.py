@@ -49,7 +49,20 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
-import pandas_ta as ta
+
+# pandas-ta install via git+ URL in requirements.txt — the PyPI release
+# is abandoned. Wrap import so a build-time install failure (network
+# issue at git clone, transient DNS, etc) doesn't crash the scanner
+# package on import. Scanner gracefully degrades to a no-op + clear
+# error message if TA_AVAILABLE is False at runtime.
+try:
+    import pandas_ta as ta
+    TA_AVAILABLE = True
+    TA_IMPORT_ERROR = None
+except Exception as _ta_err:  # ImportError or any compat issue
+    ta = None
+    TA_AVAILABLE = False
+    TA_IMPORT_ERROR = str(_ta_err)
 
 from src.config import load_credentials
 from src.data import fetch_bars
@@ -464,6 +477,26 @@ class TechnicalOverlayScanner(Scanner):
     BARS_FETCH_DAYS = DEFAULT_BARS_FETCH_DAYS
 
     def run(self, run_date: date) -> ScanResult:
+        # Graceful degradation if pandas-ta failed to install. Returns
+        # an empty (non-error) result with a clear note — scan pipeline
+        # keeps working, dashboard sees zero technicals instead of a
+        # blowup.
+        if not TA_AVAILABLE:
+            log.warning(
+                f"pandas-ta not available ({TA_IMPORT_ERROR}); "
+                "technical_overlay scanner disabled. Reinstall via "
+                "`pip install git+https://github.com/twopirllc/pandas-ta.git@development`"
+            )
+            return ScanResult(
+                scanner_name=self.name,
+                run_date=run_date,
+                candidates=pd.DataFrame(columns=["ticker", "score", "reason"]),
+                notes=[
+                    f"pandas-ta unavailable: {TA_IMPORT_ERROR}",
+                    "Scanner disabled (no error). See requirements.txt.",
+                ],
+            )
+
         # Phase 8a: read watchlist tickers (loaded fresh each run, so a
         # ticker added via dashboard at minute T appears in the next */15
         # cron fire). Skips conflict / top-N filtering — every entry on
