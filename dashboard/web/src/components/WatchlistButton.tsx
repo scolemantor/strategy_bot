@@ -1,9 +1,12 @@
-// Phase 8c WatchlistButton — star toggle, three states, optimistic UI
-// via the global watchlistStore. Color logic:
-//   - not watched          → outlined star, slate-500
-//   - watched, no position → filled star, slate-300
-//   - watched, position>0  → filled star, bull (green)
-//   - pending (mid-API)    → spinning + dim
+// Phase 8c WatchlistButton — Gmail-style star toggle, optimistic UI
+// via the global watchlistStore. Two visual states:
+//   - not watched    → outlined star, muted slate
+//   - watched        → filled star, warm amber/gold (regardless of tier)
+//   - pending (mid-API) modifier → existing color + opacity dim + pulse,
+//     so the optimistic click flips to amber immediately rather than
+//     blanking to gray
+//
+// Tier-based color variants are deferred to Phase 8e when tier badges ship.
 //
 // Stops row click event propagation so a parent <tr onClick> doesn't fire
 // when the user clicks the star (Sean's row-hover-clickable pattern).
@@ -39,25 +42,20 @@ export function WatchlistButton({
   const add = useWatchlistStore((s) => s.add);
   const remove = useWatchlistStore((s) => s.remove);
 
-  // Phase 8c Issue B diagnostic — fires on every render
-  console.log(
-    `[WB] ${sym} isWatched=${isWatched} isPending=${isPending} hasEntry=${!!entry}`,
-  );
-
-  const hasPosition =
-    entry?.position_size != null && entry.position_size > 0;
-
   const px = SIZE_PX[size];
 
-  const colorClass = isPending
-    ? "text-slate-500 opacity-50 animate-pulse"
-    : !isWatched
-      ? "text-slate-500 hover:text-slate-300"
-      : hasPosition
-        ? "text-bull hover:text-bull/80"
-        : "text-slate-300 hover:text-slate-100";
+  // Watched = warm amber gold (Gmail-starred). Unwatched = muted slate.
+  // Pending overlays opacity+pulse without overriding the color so the
+  // optimistic click visibly flips immediately.
+  const baseColor = isWatched
+    ? "text-amber-400 hover:text-amber-300"
+    : "text-slate-500 hover:text-slate-300";
+  const pendingMod = isPending ? "opacity-50 animate-pulse" : "";
+  const colorClass = [baseColor, pendingMod].filter(Boolean).join(" ");
 
   const tierLabel = entry ? `T${entry.tier}` : "";
+  const hasPosition =
+    entry?.position_size != null && entry.position_size > 0;
   const aria = isWatched
     ? `Remove ${sym} from watchlist`
     : `Add ${sym} to watchlist`;
