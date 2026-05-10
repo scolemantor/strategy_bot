@@ -1,3 +1,17 @@
+// Phase 8c: renamed from Today.tsx. Renders master_ranked.csv. The new
+// architecture (per Sean's mandate) is:
+//   /          → Watchlist (8d, not yet built)
+//   /signals   → THIS PAGE (master_ranked, discovery feed)
+//   /today     → alias to /signals (transition, will remove in 8e)
+//   /watchlist → legacy digest CSV view (kept until 8e cuts over)
+//
+// Adds WatchlistButton column on the LEFT of the Ticker column. Clicking
+// the star toggles watchlist membership without navigating to ticker
+// detail (Button stops propagation). Clicking anywhere else on the row
+// navigates to /ticker/:symbol — DataTable already has hover state
+// (`cursor-pointer hover:bg-panel2`) when onRowClick is set, so row
+// affordance is clear.
+
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { api, ApiError } from "../api";
@@ -6,6 +20,7 @@ import { DirectionBadge } from "../components/DirectionBadge";
 import { LoadingSpinner } from "../components/LoadingSpinner";
 import { ScannerBadge } from "../components/ScannerBadge";
 import { ScoreBar } from "../components/ScoreBar";
+import { WatchlistButton } from "../components/WatchlistButton";
 import type { TodayCandidate, TodayResponse } from "../types";
 
 type DirectionFilter = "all" | "bull" | "bear" | "conflict";
@@ -17,7 +32,7 @@ function classifyDirection(c: TodayCandidate): DirectionFilter {
   return "all";
 }
 
-export function Today() {
+export function Signals() {
   // /history/:date renders this same component with a target date URL param.
   const { date: routeDate } = useParams<{ date?: string }>();
   const navigate = useNavigate();
@@ -78,11 +93,12 @@ export function Today() {
 
   const columns: Column<TodayCandidate>[] = [
     {
-      key: "rank",
-      header: "#",
-      accessor: () => 0,
-      render: (_) => null,
-      className: "w-10 text-slate-500",
+      // Phase 8c: WatchlistButton column placed on the LEFT (action
+      // affordance pattern, matches Twitter/X bookmark icon position).
+      key: "watch",
+      header: "",
+      render: (r) => <WatchlistButton ticker={r.ticker} size="sm" />,
+      className: "w-8",
     },
     {
       key: "ticker",
@@ -145,11 +161,16 @@ export function Today() {
       <div className="flex items-baseline justify-between mb-4">
         <div>
           <h1 className="text-xl font-semibold">
-            {routeDate ? `Historical scan` : "Today's Picks"}
+            {routeDate ? `Historical scan` : "Signals"}
           </h1>
           {data && (
             <p className="text-sm text-slate-400 mt-1">
               {data.date} — {data.total_count} candidates, {data.conflicts_count} conflicts
+              {!routeDate && (
+                <span className="ml-2 text-slate-500">
+                  · click ★ to add to watchlist
+                </span>
+              )}
             </p>
           )}
         </div>

@@ -1,16 +1,67 @@
+import { useEffect } from "react";
 import { NavLink, Outlet, useNavigate } from "react-router-dom";
+
 import { api } from "../api";
+import { useWatchlistStore } from "../stores/watchlistStore";
+import { ToastContainer } from "./Toast";
 
 const NAV = [
-  { path: "/today", label: "Today" },
+  // Phase 8c: "Today" link renamed to "Signals" (route also renamed
+  // /today → /signals). The old /today path still resolves (redirects)
+  // for muscle memory + bookmarks until we hard-remove in 8e.
+  { path: "/signals", label: "Signals" },
   { path: "/watchlist", label: "Watchlist" },
   { path: "/history", label: "History" },
   { path: "/notifications", label: "Notifications" },
   { path: "/settings", label: "Settings" },
 ];
 
+const POLL_INTERVAL_MS = 60_000;
+
 export function Layout() {
   const navigate = useNavigate();
+  const fetchWatchlist = useWatchlistStore((s) => s.fetchAll);
+
+  // Phase 8c: poll the watchlist every 60s while the document is visible.
+  // Pause on tab-hidden; resume + immediate refetch on tab-visible. The
+  // store updates trigger re-renders for any subscribed component
+  // (WatchlistButton, future Watchlist landing page, etc).
+  useEffect(() => {
+    let intervalId: ReturnType<typeof setInterval> | null = null;
+
+    function startPolling() {
+      // Immediate fetch + interval
+      void fetchWatchlist();
+      intervalId = setInterval(() => {
+        void fetchWatchlist();
+      }, POLL_INTERVAL_MS);
+    }
+
+    function stopPolling() {
+      if (intervalId !== null) {
+        clearInterval(intervalId);
+        intervalId = null;
+      }
+    }
+
+    function onVisibilityChange() {
+      if (document.hidden) {
+        stopPolling();
+      } else if (intervalId === null) {
+        startPolling();
+      }
+    }
+
+    if (!document.hidden) {
+      startPolling();
+    }
+    document.addEventListener("visibilitychange", onVisibilityChange);
+
+    return () => {
+      stopPolling();
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+    };
+  }, [fetchWatchlist]);
 
   async function handleLogout() {
     try {
@@ -56,6 +107,8 @@ export function Layout() {
       <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 py-6">
         <Outlet />
       </main>
+      {/* Toast container offset top-14 to clear the h-12 sticky header. */}
+      <ToastContainer />
     </div>
   );
 }

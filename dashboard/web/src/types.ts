@@ -119,3 +119,68 @@ export interface ScannerSetting {
 export interface SettingsResponse {
   scanners: ScannerSetting[];
 }
+
+
+// --- Phase 8a watchlist + technical types (mirror dashboard/api/schemas.py) ---
+
+export interface TechnicalDetail {
+  ticker: string;
+  computed_at: string;
+  last_close: number;
+  setup_score: number | null;
+  reason: string | null;
+  data_sufficiency: "full" | "partial" | "minimal";
+  bar_count: number;
+  trend: {
+    ma_20: number | null;
+    ma_50: number | null;
+    ma_200: number | null;
+    above_ma_20: boolean | null;
+    above_ma_50: boolean | null;
+    above_ma_200: boolean | null;
+    ma_20_slope: string;
+    ma_50_slope: string;
+    ma_200_slope: string;
+    golden_cross_recent: boolean;
+    death_cross_recent: boolean;
+  };
+  momentum: Record<string, unknown>;
+  volume: Record<string, unknown>;
+  volatility: Record<string, unknown>;
+  key_levels: Record<string, unknown>;
+}
+
+export interface WatchlistEntry {
+  ticker: string;
+  tier: 1 | 2 | 3;
+  position_size: number | null;
+  entry_price: number | null;
+  stop_loss: number | null;
+  target_price: number | null;
+  notes: string;
+  reason: string;
+  category: string;
+  auto_added: boolean;
+  added_at: string;
+  last_modified: string;
+  added_date: string;
+  latest_technicals: TechnicalDetail | null;
+}
+
+export interface WatchlistEntriesResponse {
+  entries: WatchlistEntry[];
+  last_technical_scan: string | null;
+}
+
+export interface WatchlistAddRequest {
+  ticker: string;
+  reason?: string;
+  source?: "dashboard" | "cli" | "auto";
+  tier?: 1 | 2 | 3;
+  notes?: string;
+  category?: string;
+  position_size?: number;
+  entry_price?: number;
+  stop_loss?: number;
+  target_price?: number;
+}
