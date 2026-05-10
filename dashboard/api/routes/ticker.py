@@ -33,9 +33,13 @@ def _read_fundamentals(symbol: str) -> dict:
     if not path.exists():
         return {}
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8"))
     except Exception:
         return {}
+    # Defensive: file could contain `null`, a list, a bare string, etc.
+    # (Observed: DASH.json was a 4-byte literal `null` from a failed
+    # yfinance fetch, which previously crashed _build_response on .get())
+    return data if isinstance(data, dict) else {}
 
 
 def _build_response(symbol: str) -> dict:

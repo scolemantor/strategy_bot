@@ -127,7 +127,13 @@ class SmallCapValueScanner(Scanner):
             data = _load_cached_fundamentals(symbol)
             if data is None:
                 data = self._fetch_fundamentals(yf, symbol)
-                _save_cached_fundamentals(symbol, data)
+                # Only cache successful fetches. Previously this wrote
+                # `null` (4 bytes) to disk on yfinance failure, which
+                # then poisoned the dashboard ticker detail endpoint
+                # (_read_fundamentals returned None instead of {} and
+                # crashed _build_response on .get()).
+                if data is not None:
+                    _save_cached_fundamentals(symbol, data)
 
             if data is None or not data.get("market_cap"):
                 continue
