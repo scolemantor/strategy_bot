@@ -34,6 +34,7 @@ Honest limits:
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass
 from datetime import date, timedelta
 from typing import Dict, List, Optional
@@ -95,6 +96,70 @@ class ThirteenFChangesScanner(Scanner):
     SIGNIFICANT_ADD_PCT = 0.50  # 50%+ share increase counts as "significant"
     MAX_REASONABLE_ADD_PCT = 5.00  # 500%+ is almost always position re-establishment after sell
 
+    # Staleness filter (added 2026-05-10): 13F alpha decays sharply after
+    # 2-3 weeks per academic literature on 13F frontrunning. Filings
+    # older than MAX_FILING_AGE_DAYS are filtered out entirely; survivors
+    # within the window get a multiplier applied to their final score.
+    # Override via env var THIRTEEN_F_MAX_AGE_DAYS for testing/tuning.
+    DEFAULT_MAX_FILING_AGE_DAYS = 21
+
+    @property
+    def max_filing_age_days(self) -> int:
+        try:
+            return int(os.environ.get(
+                "THIRTEEN_F_MAX_AGE_DAYS",
+                self.DEFAULT_MAX_FILING_AGE_DAYS,
+            ))
+        except ValueError:
+            return self.DEFAULT_MAX_FILING_AGE_DAYS
+
+    @staticmethod
+    def _staleness_multiplier(days_since_filing: int) -> float:
+        """Score decay by filing age. Returns 0 when past the cutoff —
+        caller should filter those rows out, not just zero the score
+        (otherwise stale rows still appear in candidates with score=0).
+
+        Buckets:
+          0-7 days   -> 1.00x  (full score, post-filing reaction window)
+          8-14 days  -> 0.75x  (decayed but still actionable)
+          15-21 days -> 0.50x  (residual; tail of the window)
+          >21 days   -> 0.00x  (filtered out at run/backtest time)
+        Negative values (filing_date in the future, e.g. timezone edge
+        cases) are treated as fresh."""
+        if days_since_filing < 0:
+            return 1.0
+        if days_since_filing <= 7:
+            return 1.0
+        if days_since_filing <= 14:
+            return 0.75
+        if days_since_filing <= 21:
+            return 0.50
+        return 0.0
+
+    def _apply_staleness_filter(
+        self,
+        changes: List[Dict],
+        reference_date: date,
+    ) -> List[Dict]:
+        """Drop changes whose filing_date is past max_filing_age_days from
+        reference_date. Annotate survivors with `days_since_filing` and
+        `staleness_multiplier` for downstream score scaling."""
+        cutoff = self.max_filing_age_days
+        kept: List[Dict] = []
+        for c in changes:
+            fd = c.get("filing_date")
+            if fd is None:
+                # No filing date is suspicious for a 13F change; drop it.
+                continue
+            days_old = (reference_date - fd).days
+            mult = self._staleness_multiplier(days_old)
+            if mult == 0.0 or days_old > cutoff:
+                continue
+            c["days_since_filing"] = days_old
+            c["staleness_multiplier"] = mult
+            kept.append(c)
+        return kept
+
     def run(self, run_date: date) -> ScanResult:
         log.info(f"Tracking {len(TRACKED_FUNDS)} smart-money funds")
         log.info(f"Min new-position value: ${self.MIN_NEW_POSITION_VALUE:,}")
@@ -136,6 +201,23 @@ class ThirteenFChangesScanner(Scanner):
         if not all_changes:
             return empty_result(self.name, run_date)
 
+        # Step 1.5: staleness filter. 13F alpha decays sharply after
+        # 2-3 weeks; drop filings older than max_filing_age_days from
+        # run_date. See _staleness_multiplier docstring for buckets.
+        before_staleness = len(all_changes)
+        all_changes = self._apply_staleness_filter(all_changes, run_date)
+        log.info(
+            f"Staleness filter (max {self.max_filing_age_days}d): "
+            f"{len(all_changes)} kept, {before_staleness - len(all_changes)} dropped"
+        )
+
+        if not all_changes:
+            log.info(
+                "All qualifying changes were past the staleness cutoff. "
+                "Next quarter's 13Fs typically file 45 days after quarter end."
+            )
+            return empty_result(self.name, run_date)
+
         # Step 2: Resolve all unique CUSIPs to tickers
         unique_cusips = list(set(c["cusip"] for c in all_changes if c["cusip"]))
         log.info(f"Resolving {len(unique_cusips)} unique CUSIPs to tickers...")
@@ -150,11 +232,14 @@ class ThirteenFChangesScanner(Scanner):
             if not ticker:
                 continue
 
-            # Score: dollar value (in millions) + bonus for "new" vs "add"
+            # Score: dollar value (in millions) + bonus for "new" vs "add",
+            # decayed by filing age (staleness_multiplier set by
+            # _apply_staleness_filter above).
             value_score = min(100, c["new_value"] / 10_000_000)  # $1B = 100, $100M = 10
             new_bonus = 30 if c["action"] == "new" else 0
             pct_bonus = min(20, c.get("pct_increase", 0) * 10) if c["action"] == "add" else 0
-            score = value_score + new_bonus + pct_bonus
+            raw_score = value_score + new_bonus + pct_bonus
+            score = raw_score * c["staleness_multiplier"]
 
             rows.append({
                 "ticker": ticker,
@@ -168,6 +253,8 @@ class ThirteenFChangesScanner(Scanner):
                 "pct_increase": round(c.get("pct_increase", 0) * 100, 1) if c["action"] == "add" else None,
                 "filing_date": c["filing_date"].isoformat() if c.get("filing_date") else "",
                 "period_of_report": c["period_of_report"].isoformat() if c.get("period_of_report") else "",
+                "days_since_filing": c["days_since_filing"],
+                "staleness_multiplier": c["staleness_multiplier"],
                 "score": round(score, 2),
                 "reason": self._build_reason(c, ticker),
             })
@@ -186,23 +273,28 @@ class ThirteenFChangesScanner(Scanner):
                 f"Funds with qualifying changes: {funds_with_changes}",
                 f"Min new-position value: ${self.MIN_NEW_POSITION_VALUE:,}",
                 f"Significant-add threshold: {self.SIGNIFICANT_ADD_PCT:.0%}",
+                f"Staleness window: {self.max_filing_age_days} days from run_date",
                 f"Final candidates after ticker resolution: {len(rows)}",
             ],
         )
 
     def _build_reason(self, change: Dict, ticker: str) -> str:
+        age_suffix = ""
+        days_old = change.get("days_since_filing")
+        if days_old is not None:
+            age_suffix = f" [filed {days_old}d ago]"
         if change["action"] == "new":
             return (
                 f"{change['fund_name']} opened NEW position in {ticker} "
                 f"(${change['new_value']/1e6:.1f}M, {change['new_shares']:,} sh) "
-                f"in Q ending {change['period_of_report']}"
+                f"in Q ending {change['period_of_report']}{age_suffix}"
             )
         else:
             pct = change.get("pct_increase", 0) * 100
             return (
                 f"{change['fund_name']} INCREASED {ticker} by {pct:.0f}% "
                 f"({change.get('prior_shares', 0):,} -> {change['new_shares']:,} sh, "
-                f"${change['new_value']/1e6:.1f}M) in Q ending {change['period_of_report']}"
+                f"${change['new_value']/1e6:.1f}M) in Q ending {change['period_of_report']}{age_suffix}"
             )
 
     def _process_fund(self, fund_name: str, cik: str) -> Optional[List[Dict]]:
@@ -365,6 +457,19 @@ def backtest_mode(as_of_date: date, output_dir=None) -> int:
     if not all_changes:
         return 0
 
+    # Staleness filter: same buckets as production run(), but reference
+    # date is as_of_date so historical replays decay correctly relative
+    # to when the signal would have been visible in real-time.
+    before_staleness = len(all_changes)
+    all_changes = scanner._apply_staleness_filter(all_changes, as_of_date)
+    log.debug(
+        f"  thirteen_f_changes {as_of_date}: staleness filter "
+        f"(max {scanner.max_filing_age_days}d) kept "
+        f"{len(all_changes)}/{before_staleness}"
+    )
+    if not all_changes:
+        return 0
+
     # Resolve CUSIPs to tickers (cached forever)
     unique_cusips = list(set(c["cusip"] for c in all_changes if c["cusip"]))
     cusip_to_ticker = resolve_cusips(unique_cusips)
@@ -378,7 +483,8 @@ def backtest_mode(as_of_date: date, output_dir=None) -> int:
         value_score = min(100, c["new_value"] / 10_000_000)
         new_bonus = 30 if c["action"] == "new" else 0
         pct_bonus = min(20, c.get("pct_increase", 0) * 10) if c["action"] == "add" else 0
-        score = value_score + new_bonus + pct_bonus
+        raw_score = value_score + new_bonus + pct_bonus
+        score = raw_score * c["staleness_multiplier"]
 
         rows.append({
             "ticker": ticker,
@@ -392,6 +498,8 @@ def backtest_mode(as_of_date: date, output_dir=None) -> int:
             "pct_increase": round(c.get("pct_increase", 0) * 100, 1) if c["action"] == "add" else None,
             "filing_date": c["filing_date"].isoformat() if c.get("filing_date") else "",
             "period_of_report": c["period_of_report"].isoformat() if c.get("period_of_report") else "",
+            "days_since_filing": c["days_since_filing"],
+            "staleness_multiplier": c["staleness_multiplier"],
             "score": round(score, 2),
             "reason": scanner._build_reason(c, ticker),
         })
