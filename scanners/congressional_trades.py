@@ -99,6 +99,11 @@ QUIVER_API_KEY_ENV = "QUIVER_API_KEY"
 # pages of this size; if it ignores `page_size`, we get the full array. A
 # response of EXACTLY this length triggers the truncation warning.
 QUIVER_PAGE_SIZE = 10000
+# Pagination safety cap (added 2026-05-10). 10 pages * 10k = 100k records,
+# enough headroom for any realistic lookback window. Hitting the cap with
+# oldest_traded still > cutoff means we lost data — log warning so the
+# operator can shrink the window.
+QUIVER_MAX_PAGES = 10
 # TickerType values that the scanner accepts as common stock. Verified
 # against a 50-record live sample 2026-05-09. Three accepted forms:
 #   "Stock" (Quiver's common label, normalized to "STOCK" after .upper())
@@ -393,8 +398,9 @@ class CongressionalTradesScanner(Scanner):
             candidates=df,
             notes=[
                 f"Lookback (disclosure_date): {self.lookback_days} days",
-                f"House records: {len(house_raw)}, Senate: {len(senate_raw)}",
-                f"Trades parsed: {len(trades)}, in-window purchases: {len(purchases)}",
+                f"Quiver records: {len(raw_records)} (house={house_count}, senate={senate_count})",
+                f"Common-stock trades parsed: {len(trades)}",
+                f"In disclosure window: {len(in_window)}, purchases w/ ticker: {len(purchases)}",
                 f"Distinct tickers w/ purchases: {len(by_ticker)}",
                 f"Flagged (cluster or high-signal): {len(rows)}",
                 "Amounts are STOCK Act bracket midpoints — approximate by design.",
@@ -404,18 +410,19 @@ class CongressionalTradesScanner(Scanner):
     def _fetch_quiver_feed(
         self, api_key: str, cutoff: date, run_date: date,
     ) -> List[Dict]:
-        """Fetch Quiver's bulk congresstrading endpoint. Sends defensive
-        date_from/date_to + page/page_size params per the OpenAPI spec —
-        if the server honors them, we save bandwidth; if not, we still
-        get the full array and the caller's client-side cutoff filter
-        applies. Cached for CACHE_TTL_HOURS.
+        """Fetch Quiver's bulk congresstrading endpoint with full pagination
+        (added 2026-05-10). Loops `page=1, 2, ...` until any of:
 
-        Pagination: not looped in this version. The official Python
-        wrapper hits this endpoint with no params and parses a flat array,
-        suggesting one-shot returns the full set. If the truncation
-        diagnostic (response length == QUIVER_PAGE_SIZE) fires AND the
-        latest TransactionDate seen falls before our window, follow-up
-        commit needs a real pagination loop.
+          - the page returns fewer than QUIVER_PAGE_SIZE records (last page)
+          - the oldest `Traded` date on the page falls at/below the cutoff
+            (we have the full window)
+          - the oldest_traded value didn't change vs the previous page
+            (server isn't honoring pagination — abort cleanly with a
+            warning instead of looping forever)
+          - QUIVER_MAX_PAGES safety cap
+
+        Cached for CACHE_TTL_HOURS as a single JSON array (the union of
+        all pages fetched).
 
         Auth: `Authorization: Bearer <key>` (Quiver also accepts the
         legacy `Token` form for back-compat)."""
@@ -426,50 +433,93 @@ class CongressionalTradesScanner(Scanner):
                 log.debug(f"Using cached Quiver bulk feed ({age_hours:.1f}h old)")
                 return json.loads(cache_path.read_text())
 
-        params = {
-            "date_from": cutoff.isoformat(),
-            "date_to": run_date.isoformat(),
-            "page": 1,
-            "page_size": QUIVER_PAGE_SIZE,
-        }
-        log.info(f"Fetching Quiver bulk feed from {QUIVER_FEED_URL} params={params}")
-        resp = requests.get(
-            QUIVER_FEED_URL,
-            params=params,
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "User-Agent": USER_AGENT,
-                "Accept": "application/json",
-            },
-            timeout=REQUEST_TIMEOUT,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        if not isinstance(data, list):
-            raise ValueError(
-                f"Unexpected Quiver response shape: {type(data).__name__}; "
-                f"expected list. Body head: {str(data)[:200]}"
+        all_data: List[Dict] = []
+        page = 1
+        prev_oldest: Optional[date] = None
+        while True:
+            params = {
+                "date_from": cutoff.isoformat(),
+                "date_to": run_date.isoformat(),
+                "page": page,
+                "page_size": QUIVER_PAGE_SIZE,
+            }
+            log.info(
+                f"Fetching Quiver bulk feed page={page} "
+                f"(cumulative={len(all_data)}) from {QUIVER_FEED_URL}"
             )
+            resp = requests.get(
+                QUIVER_FEED_URL,
+                params=params,
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "User-Agent": USER_AGENT,
+                    "Accept": "application/json",
+                },
+                timeout=REQUEST_TIMEOUT,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            if not isinstance(data, list):
+                raise ValueError(
+                    f"Unexpected Quiver response shape: {type(data).__name__}; "
+                    f"expected list. Body head: {str(data)[:200]}"
+                )
 
-        # Truncation diagnostic: if the response is exactly page_size,
-        # we may have hit a server-side cap. Check the oldest Traded date
-        # to tell if we got the full window or only the most recent slice.
-        if len(data) == QUIVER_PAGE_SIZE:
+            all_data.extend(data)
+            log.info(f"  page {page}: got {len(data)} records "
+                     f"(cumulative={len(all_data)})")
+
+            # Stop 1: short page — server says we have everything.
+            if len(data) < QUIVER_PAGE_SIZE:
+                log.info(f"  page {page}: short page; pagination complete")
+                break
+
+            # Compute oldest_traded for stop conditions 2 + 3.
             txn_dates = [self._parse_date(r.get("Traded")) for r in data]
             txn_dates = [d for d in txn_dates if d is not None]
-            latest_txn = max(txn_dates) if txn_dates else None
             oldest_txn = min(txn_dates) if txn_dates else None
-            within_window = oldest_txn is not None and oldest_txn <= cutoff
-            log.warning(
-                f"Quiver returned exactly {QUIVER_PAGE_SIZE} records — "
-                f"may be truncated. latest_traded={latest_txn} oldest_traded={oldest_txn} "
-                f"cutoff={cutoff} within_window={within_window}. "
-                f"If within_window=False, pagination loop is required."
-            )
+
+            # Stop 2: covered the whole window.
+            if oldest_txn is not None and oldest_txn <= cutoff:
+                log.info(
+                    f"  page {page}: oldest_traded={oldest_txn} <= cutoff={cutoff}; "
+                    f"pagination complete"
+                )
+                break
+
+            # Stop 3: server-side pagination doesn't appear to work — same
+            # oldest_traded value on consecutive pages means we're getting
+            # the same slice over and over. Bail out cleanly.
+            if page > 1 and oldest_txn == prev_oldest:
+                log.warning(
+                    f"  page {page}: oldest_traded ({oldest_txn}) unchanged from "
+                    f"previous page — Quiver may not honor `page` parameter. "
+                    f"Aborting loop with {len(all_data)} records (likely deduped)."
+                )
+                break
+            prev_oldest = oldest_txn
+
+            # Stop 4: safety cap. Operator should shrink lookback_days if
+            # this fires while oldest_traded > cutoff.
+            if page >= QUIVER_MAX_PAGES:
+                log.warning(
+                    f"Hit QUIVER_MAX_PAGES={QUIVER_MAX_PAGES} cap with "
+                    f"oldest_traded={oldest_txn} still > cutoff={cutoff}. "
+                    f"Older records may be missed — consider shrinking "
+                    f"lookback_days or raising QUIVER_MAX_PAGES."
+                )
+                break
+
+            page += 1
+
+        log.info(
+            f"Quiver pagination complete: {len(all_data)} records across "
+            f"{page} page(s)"
+        )
 
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
-        cache_path.write_text(json.dumps(data))
-        return data
+        cache_path.write_text(json.dumps(all_data))
+        return all_data
 
     def _parse_quiver_record(self, raw: Dict) -> Optional[CongressionalTrade]:
         """Parse one Quiver bulk congresstrading record.
