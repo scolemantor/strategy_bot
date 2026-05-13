@@ -86,3 +86,11 @@ scanners:
     direction: bullish
     category: conviction
     weight: 1.0  # starts conservative; raise toward 1.1-1.2 after live signal validates
+  # Phase 4g.1 (2026-05-12) — first paid-data scanner. Bullish-only by
+  # construction: the scanner filters to call-skewed tickers (>=60% call
+  # premium); mixed and put-skewed flow goes to options_unusual_rejected.csv
+  # and will surface in a symmetric options_unusual_puts scanner in 4g.1c.
+  options_unusual:
+    direction: bullish
+    category: technical
+    weight: 1.0  # starts conservative; tune after first week of live data

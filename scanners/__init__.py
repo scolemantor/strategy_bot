@@ -1,10 +1,17 @@
 """Registry of all scanners. Add new ones here as they're built.
 
-Currently 15 scanners registered, 14 active in scan_all (#18
-congressional_trades enabled in scan_all 2026-05-09 after standalone
-validation; technical_overlay added as Phase 8a but excluded from
-scan_all because it runs intraday on its own cron, not as part of the
-daily pipeline; #14-17 paid-data scanners still deferred per Phase 4g).
+Currently 16 scanners registered, 15 active in scan_all:
+  - #14 options_unusual added Phase 4g.1 (2026-05-12) — first paid-data
+    scanner; requires UNUSUAL_WHALES_API_TOKEN env var. Returns empty
+    cleanly (not an error) when token is missing, so other scanners in
+    scan_all are unaffected.
+  - #18 congressional_trades enabled in scan_all 2026-05-09 after
+    standalone validation. Pending Phase 4g.1b UW-backed replacement;
+    current Quiver impl remains active until that ships.
+  - technical_overlay (Phase 8a) excluded from scan_all — runs intraday
+    on its own cron, not as part of the daily pipeline.
+  - #15-17 (FMP fundamentals, Polygon, Benzinga) deferred per Phase
+    4g.2/4g.3/4g.4 roadmap.
 """
 from __future__ import annotations
 
@@ -20,6 +27,7 @@ from .insider_buying import InsiderBuyingScanner
 from .insider_selling_clusters import InsiderSellingClustersScanner
 from .ipo_lockup import IpoLockupScanner
 from .macro_calendar import MacroCalendarScanner
+from .options_unusual import OptionsUnusualScanner
 from .sector_rotation import SectorRotationScanner
 from .short_squeeze import ShortSqueezeScanner
 from .small_cap_value import SmallCapValueScanner
@@ -41,6 +49,7 @@ SCANNERS: Dict[str, Type[Scanner]] = {
     "macro_calendar": MacroCalendarScanner,
     "ipo_lockup": IpoLockupScanner,
     "insider_selling_clusters": InsiderSellingClustersScanner,
+    "options_unusual": OptionsUnusualScanner,  # #14 — Phase 4g.1
     "congressional_trades": CongressionalTradesScanner,
     "technical_overlay": TechnicalOverlayScanner,
 }

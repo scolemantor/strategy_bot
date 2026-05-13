@@ -74,3 +74,8 @@ scanners:
   # Same large-cap-friendly universe assumption as 13F; loose default fits
   congressional_trades:
     tier: loose
+
+  # Unusual options flow (Phase 4g.1) — UW unusual flow concentrates in
+  # mid/large-cap names with real options markets; loose default fits.
+  options_unusual:
+    tier: loose
